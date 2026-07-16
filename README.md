@@ -20,14 +20,18 @@ Namespaces self-register at startup, so adding a new one is a single package wit
 ## Layout
 
 ```
-cmd/server/main.go     # config, mux wiring, graceful shutdown
+cmd/server/main.go     # config, graceful shutdown
 internal/
-  mcpx/                # registry + shared middleware (auth, otel, recover)
-  memory/              # server.go, tools.go, store.go, register.go
-  skills/
-  event/
-migrations/
+  mcpx/                # registry, Handler(), Chain(); integration test
+  memory/              # register.go  (dummy memory_ping tool)
+  skills/              # register.go  (dummy skills_ping tool)
+  event/               # register.go  (dummy event_ping tool)
 ```
+
+Each namespace currently exposes one dummy `*_ping` tool for verifying the
+connection. `internal/mcpx/integration_test.go` drives a real MCP client
+through `initialize` + `tools/call` against all three over an in-process
+Streamable HTTP server.
 
 ## Quick start
 
