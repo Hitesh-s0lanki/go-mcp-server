@@ -46,10 +46,16 @@ func main() {
 		defer pool.Close()
 	}
 
+	// Signal-scoped context, created before the handler so it can back
+	// namespaces' background work (memory's embedding workers): cancelling it on
+	// SIGINT/SIGTERM stops those goroutines as part of shutdown.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	handler, err := mcpx.Handler(mcpx.Options{
 		Log:               log,
 		AllowExternalHost: allowExternalHost,
-		Deps:              mcpx.Deps{Log: log, DB: pool},
+		Deps:              mcpx.Deps{Log: log, DB: pool, Ctx: ctx},
 		OnMount: func(path string) {
 			log.Info("mounted namespace", "path", path)
 		},
@@ -66,10 +72,8 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// Graceful shutdown on SIGINT/SIGTERM.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
+	// Graceful shutdown on SIGINT/SIGTERM (ctx is the signal context created
+	// above; cancelling it also stops namespace background workers).
 	go func() {
 		log.Info("listening", "addr", addr)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

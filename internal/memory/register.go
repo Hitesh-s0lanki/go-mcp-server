@@ -28,6 +28,6 @@ func (namespace) Server(deps *mcpx.Deps) (*mcp.Server, error) {
 	}
 
 	srv := mcp.NewServer(&mcp.Implementation{Name: "memory", Version: "0.1.0"}, nil)
-	registerTools(srv, NewStore(deps.DB, emb))
+	registerTools(srv, NewStore(deps.Ctx, deps.DB, emb, deps.Log))
 	return srv, nil
 }

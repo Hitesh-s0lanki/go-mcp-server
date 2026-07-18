@@ -81,6 +81,15 @@ migrate:
 	@for f in migrations/*.sql; do echo "applying $$f"; psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -f "$$f" >/dev/null || exit 1; done
 	@echo "migrations applied"
 
+## apikey: mint a memory API key (mcp_<32 hex>) into $DATABASE_URL. LABEL=name optional
+apikey:
+	@test -n "$(DATABASE_URL)" || { echo "DATABASE_URL is not set"; exit 1; }
+	@KEY="mcp_$$(uuidgen | tr 'A-Z' 'a-z' | tr -d '-')"; \
+	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -tAc \
+	  "INSERT INTO api_keys (key, label) VALUES ('$$KEY', '$(LABEL)') RETURNING key;" \
+	  || exit 1; \
+	echo "minted $$KEY  — set it as the X-API-Key header in .mcp.json"
+
 ## pgdev: run a local pgvector in docker (needs Docker running)
 pgdev:
 	docker run -d --name mcp-pg -e POSTGRES_PASSWORD=pg -e POSTGRES_DB=mcp \
@@ -109,4 +118,4 @@ clean:
 	rm -rf bin coverage.out
 	@echo "cleaned"
 
-.PHONY: help run build test testv cover fmt vet lint lintfix tidy migrate pgdev check health tunnel clean
+.PHONY: help run build test testv cover fmt vet lint lintfix tidy migrate apikey pgdev check health tunnel clean

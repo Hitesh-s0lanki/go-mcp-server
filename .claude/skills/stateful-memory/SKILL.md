@@ -8,8 +8,9 @@ description: >-
   before: at session start to recall who the user is, their preferences and
   stack; before any task that references prior work, a past decision, or a named
   project/feature/person ("continue the X", "the Y we discussed"); when the user
-  asks something you might have recorded; and after finishing substantial work,
-  to persist a summary for future retrieval.
+  asks something you might have recorded; when the user states a durable fact or
+  preference about themselves or how they want to work (save it immediately); and
+  after finishing substantial work, to persist a summary for future retrieval.
 ---
 
 # Stateful knowledge & memory protocol
@@ -21,8 +22,10 @@ their preferences and stack, and summaries of prior work and decisions, so a
 session starts by *retrieving* relevant context instead of from a blank slate —
 and *persists* what it learns for next time.
 
-**Identity is automatic.** The `X-User-Email` header (set in `.mcp.json`) scopes
-every call. Never pass an email as a tool argument — there is no such argument.
+**Identity is automatic.** The `X-API-Key` header (set in `.mcp.json`) scopes
+every call to one API key. Never pass an identity as a tool argument — there is
+no such argument. Each key retains only its most recent 20 memories; older ones
+are evicted as new ones are written, so store what matters and keep it current.
 
 Tools: `memory_search` (semantic + keyword), `memory_write`, `memory_get` (full
 content by id), `memory_update`, `memory_delete`, `memory_list` (browse by tag,
@@ -59,13 +62,16 @@ summary of the same thing exists, `memory_update` it rather than duplicating.
 memory_search { "query": "hybrid search implementation", "tags": ["task-summary"] }
 # no match -> memory_write ; match -> memory_update the existing id
 memory_write {
-  "content": "[TASK] Hybrid memory search\nWhat: we built retrieval that combines semantic meaning with keyword matching, fusing the two result lists.\nOutcome: shipped and verified against Neon + OpenAI.\nDecisions: similarity floor 0.35, calibrated for text-embedding-3-small; identity comes from the X-User-Email header, not a tool argument.\nFiles: internal/memory/store.go, tools.go.\nFollow-ups: no reranker yet.",
+  "content": "[TASK] Hybrid memory search\nWhat: we built retrieval that combines semantic meaning with keyword matching, fusing the two result lists.\nOutcome: shipped and verified against Neon + OpenAI.\nDecisions: similarity floor 0.35, calibrated for text-embedding-3-small; identity comes from the X-API-Key header, not a tool argument.\nFiles: internal/memory/store.go, tools.go.\nFollow-ups: no reranker yet.",
   "tags": ["task-summary", "project:go-mcp-server", "topic:memory"]
 }
 ```
 
 **When you learn a durable fact about the user** (role, preferences, how they
-like to work, key constraints), store it under `user-profile`:
+like to work, key constraints), store it under `user-profile` — **the moment
+they state it**, not only after a task. This is the easiest trigger to miss: a
+preference dropped mid-conversation ("treat me as a senior engineer", "I prefer
+X") is durable knowledge; write it right away rather than letting it pass.
 
 ```
 memory_write {

@@ -4,6 +4,7 @@
 package mcpx
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -18,6 +19,12 @@ import (
 type Deps struct {
 	Log *slog.Logger
 	DB  *pgxpool.Pool
+
+	// Ctx is the process lifetime: it is cancelled when the server begins
+	// shutting down. Namespaces that spawn background goroutines (e.g. memory's
+	// embedding workers) should tie them to this so they stop cleanly. Nil is
+	// treated as context.Background() by consumers.
+	Ctx context.Context
 }
 
 // Namespace is one mounted MCP server. Each domain package implements this and

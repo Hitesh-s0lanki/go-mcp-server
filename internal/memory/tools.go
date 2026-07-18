@@ -95,7 +95,7 @@ func registerTools(srv *mcp.Server, store *Store) {
 
 func toolSearch(store *Store) mcp.ToolHandlerFor[searchInput, searchOutput] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, searchOutput, error) {
-		email, err := callerEmail(req)
+		scope, err := callerScope(ctx, store, req)
 		if err != nil {
 			return errResult(err), searchOutput{}, nil
 		}
@@ -108,7 +108,7 @@ func toolSearch(store *Store) mcp.ToolHandlerFor[searchInput, searchOutput] {
 			minScore = float32(in.MinScore)
 		}
 
-		hits, err := store.Search(ctx, email, SearchParams{
+		hits, err := store.Search(ctx, scope, SearchParams{
 			Query:    in.Query,
 			Limit:    in.Limit,
 			MinScore: minScore,
@@ -132,7 +132,7 @@ func toolSearch(store *Store) mcp.ToolHandlerFor[searchInput, searchOutput] {
 
 func toolWrite(store *Store) mcp.ToolHandlerFor[writeInput, Memory] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, in writeInput) (*mcp.CallToolResult, Memory, error) {
-		email, err := callerEmail(req)
+		scope, err := callerScope(ctx, store, req)
 		if err != nil {
 			return errResult(err), Memory{}, nil
 		}
@@ -140,7 +140,7 @@ func toolWrite(store *Store) mcp.ToolHandlerFor[writeInput, Memory] {
 			return errResult(errors.New("content is required")), Memory{}, nil
 		}
 
-		m, err := store.Write(ctx, email, in.Content, in.Tags, in.Metadata)
+		m, err := store.Write(ctx, scope, in.Content, in.Tags, in.Metadata)
 		if err != nil {
 			return errResult(err), Memory{}, nil
 		}
@@ -152,11 +152,11 @@ func toolWrite(store *Store) mcp.ToolHandlerFor[writeInput, Memory] {
 
 func toolGet(store *Store) mcp.ToolHandlerFor[idInput, Memory] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, in idInput) (*mcp.CallToolResult, Memory, error) {
-		email, err := callerEmail(req)
+		scope, err := callerScope(ctx, store, req)
 		if err != nil {
 			return errResult(err), Memory{}, nil
 		}
-		m, err := store.Get(ctx, email, in.ID)
+		m, err := store.Get(ctx, scope, in.ID)
 		if err != nil {
 			return errResult(err), Memory{}, nil
 		}
@@ -168,14 +168,14 @@ func toolGet(store *Store) mcp.ToolHandlerFor[idInput, Memory] {
 
 func toolUpdate(store *Store) mcp.ToolHandlerFor[updateInput, Memory] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, in updateInput) (*mcp.CallToolResult, Memory, error) {
-		email, err := callerEmail(req)
+		scope, err := callerScope(ctx, store, req)
 		if err != nil {
 			return errResult(err), Memory{}, nil
 		}
 		if strings.TrimSpace(in.Content) == "" {
 			return errResult(errors.New("content is required")), Memory{}, nil
 		}
-		m, err := store.Update(ctx, email, in.ID, in.Content)
+		m, err := store.Update(ctx, scope, in.ID, in.Content)
 		if err != nil {
 			return errResult(err), Memory{}, nil
 		}
@@ -192,11 +192,11 @@ type deleteOutput struct {
 
 func toolDelete(store *Store) mcp.ToolHandlerFor[idInput, deleteOutput] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, in idInput) (*mcp.CallToolResult, deleteOutput, error) {
-		email, err := callerEmail(req)
+		scope, err := callerScope(ctx, store, req)
 		if err != nil {
 			return errResult(err), deleteOutput{}, nil
 		}
-		if err := store.Delete(ctx, email, in.ID); err != nil {
+		if err := store.Delete(ctx, scope, in.ID); err != nil {
 			return errResult(err), deleteOutput{}, nil
 		}
 		return &mcp.CallToolResult{
@@ -211,7 +211,7 @@ type listOutput struct {
 
 func toolList(store *Store) mcp.ToolHandlerFor[listInput, listOutput] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, in listInput) (*mcp.CallToolResult, listOutput, error) {
-		email, err := callerEmail(req)
+		scope, err := callerScope(ctx, store, req)
 		if err != nil {
 			return errResult(err), listOutput{}, nil
 		}
@@ -219,7 +219,7 @@ func toolList(store *Store) mcp.ToolHandlerFor[listInput, listOutput] {
 		if limit <= 0 {
 			limit = 20
 		}
-		ms, err := store.List(ctx, email, in.Tags, limit)
+		ms, err := store.List(ctx, scope, in.Tags, limit)
 		if err != nil {
 			return errResult(err), listOutput{}, nil
 		}
@@ -227,6 +227,17 @@ func toolList(store *Store) mcp.ToolHandlerFor[listInput, listOutput] {
 			Content: []mcp.Content{&mcp.TextContent{Text: renderList(ms)}},
 		}, listOutput{Memories: ms}, nil
 	}
+}
+
+// callerScope turns the request's X-API-Key header into the api_key_id that
+// scopes every store call. It fails if the header is absent/malformed
+// (callerKey) or the key is not registered (store.ResolveKey).
+func callerScope(ctx context.Context, store *Store, req *mcp.CallToolRequest) (string, error) {
+	key, err := callerKey(req)
+	if err != nil {
+		return "", err
+	}
+	return store.ResolveKey(ctx, key)
 }
 
 // errResult reports a failure to the model rather than to the transport.

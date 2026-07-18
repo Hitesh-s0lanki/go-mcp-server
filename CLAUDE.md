@@ -24,8 +24,13 @@ Treat it as long-term memory of the user and the work:
 - **Retrieve** relevant knowledge in real time before acting — who the user is,
   their preferences and stack, and any prior decisions, summaries, or context
   about the topic at hand. Pull it instead of asking, or assuming a blank slate.
-- **Persist** new knowledge after substantial work — a concise summary of what
-  was done and decided — so a future session can retrieve it.
+- **Capture the moment it happens (always-on):** when the user states a durable
+  fact or preference about themselves or how they want to work, `memory_write`
+  it right then (tag `user-profile`) — do not wait for a task to finish, and do
+  not treat it as too small. This is inline behaviour, not something gated behind
+  a retrieval task.
+- **Persist** after substantial work — a concise summary of what was done and
+  decided — so a future session can retrieve it.
 
 The **`stateful-memory` skill** ([.claude/skills/stateful-memory/SKILL.md](.claude/skills/stateful-memory/SKILL.md))
 is the operating protocol: when and how to retrieve, when to persist, the

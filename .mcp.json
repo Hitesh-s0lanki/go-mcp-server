@@ -4,7 +4,7 @@
       "type": "http",
       "url": "https://robust-enough-loon.ngrok-free.app/memory/mcp",
       "headers": {
-        "X-User-Email": "hiteshsolanki4623@gamil.com"
+        "X-API-Key": "mcp_d398e9b902cc4cf3ab438dbe8cf76715"
       }
     },
     "skills": {

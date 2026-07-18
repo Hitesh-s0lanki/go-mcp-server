@@ -3,11 +3,13 @@ package memory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"math"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -58,13 +60,31 @@ func testStore(t *testing.T) *Store {
 	if _, err := pool.Exec(context.Background(), `TRUNCATE memories`); err != nil {
 		t.Fatalf("truncate (did you apply migrations/0001_memories.sql?): %v", err)
 	}
-	return NewStore(pool, fakeEmbedder{})
+	s := NewStore(context.Background(), pool, fakeEmbedder{}, nil)
+	// Drain background embeds before the pool closes so no worker touches a
+	// closed pool. Cleanups run last-registered-first, so this runs before the
+	// pool.Close registered above.
+	t.Cleanup(func() {
+		s.flushEmbeds()
+		s.Close()
+	})
+	return s
+}
+
+// mustKey mints an API key and returns its id (the memory partition key).
+func mustKey(t *testing.T, s *Store) string {
+	t.Helper()
+	_, id, err := s.CreateAPIKey(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	return id
 }
 
 func TestWriteGetDelete(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
-	const user = "a@example.com"
+	user := mustKey(t, s)
 
 	m, err := s.Write(ctx, user, "the deploy pipeline runs on buildkite", []string{"ops"}, nil)
 	if err != nil {
@@ -90,17 +110,89 @@ func TestWriteGetDelete(t *testing.T) {
 	}
 }
 
+// slowEmbedder wraps fakeEmbedder with a delay, standing in for the real
+// OpenAI round-trip so a test can observe that a write does not wait on it.
+type slowEmbedder struct{ delay time.Duration }
+
+func (s slowEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	select {
+	case <-time.After(s.delay):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return fakeEmbedder{}.Embed(ctx, text)
+}
+
+// TestWriteReturnsBeforeEmbedding pins the whole point of the async path: a write
+// returns immediately (no embedding round-trip on the request path), and the
+// vector is filled in by a background worker a moment later.
+func TestWriteReturnsBeforeEmbedding(t *testing.T) {
+	ctx := context.Background()
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("DATABASE_URL not set")
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, `TRUNCATE memories`); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+
+	// embedDelay is set far above any plausible INSERT round-trip (the DB may be
+	// remote) so the two are cleanly separable: if the write returns in a small
+	// fraction of it, the write demonstrably did not wait on the embedding.
+	const embedDelay = 3 * time.Second
+	s := NewStore(ctx, pool, slowEmbedder{delay: embedDelay}, nil)
+	t.Cleanup(func() { s.flushEmbeds(); s.Close() })
+
+	user := mustKey(t, s)
+	start := time.Now()
+	m, err := s.Write(ctx, user, "async pipeline embeds off the request path", nil, nil)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed >= embedDelay/2 {
+		t.Fatalf("write appears to block on embedding: took %v (embed delay is %v)", elapsed, embedDelay)
+	}
+
+	// Immediately, the memory exists and is keyword-searchable, but not yet
+	// vector-searchable.
+	if _, err := s.Get(ctx, user, m.ID); err != nil {
+		t.Fatalf("memory not readable right after write: %v", err)
+	}
+
+	// After the background worker completes, it joins vector search.
+	s.flushEmbeds()
+	hits, err := s.Search(ctx, user, SearchParams{Query: "async pipeline request path", Limit: 5})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	var vectorized bool
+	for _, h := range hits {
+		if h.ID == m.ID && (h.Source == "vector" || h.Source == "both") {
+			vectorized = true
+		}
+	}
+	if !vectorized {
+		t.Fatalf("memory never became vector-searchable after flush; hits=%+v", hits)
+	}
+}
+
 // TestScopingIsolation is the security-critical test: one user must never be
 // able to read, update, or delete another user's memory, even with a valid id.
 func TestScopingIsolation(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
-	const alice, bob = "alice@example.com", "bob@example.com"
+	alice, bob := mustKey(t, s), mustKey(t, s)
 
 	m, err := s.Write(ctx, alice, "alice private api key rotation notes", nil, nil)
 	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
+	s.flushEmbeds() // make the memory vector-searchable before asserting on search
 
 	if _, err := s.Get(ctx, bob, m.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("bob read alice's memory by id: err=%v", err)
@@ -129,7 +221,7 @@ func TestScopingIsolation(t *testing.T) {
 func TestHybridSearch(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
-	const user = "a@example.com"
+	user := mustKey(t, s)
 
 	seed := []string{
 		"the deploy pipeline runs on buildkite every morning",
@@ -141,6 +233,7 @@ func TestHybridSearch(t *testing.T) {
 			t.Fatalf("seed write: %v", err)
 		}
 	}
+	s.flushEmbeds() // wait for background embedding so the vector arm participates
 
 	hits, err := s.Search(ctx, user, SearchParams{
 		Query: "deploy pipeline buildkite", Limit: 5,
@@ -161,11 +254,12 @@ func TestHybridSearch(t *testing.T) {
 func TestSearchBelowThresholdReturnsNothing(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
-	const user = "a@example.com"
+	user := mustKey(t, s)
 
 	if _, err := s.Write(ctx, user, "the cat sat on the mat", nil, nil); err != nil {
 		t.Fatalf("write: %v", err)
 	}
+	s.flushEmbeds() // so the row is embedded and the test exercises the threshold, not a missing vector
 
 	hits, err := s.Search(ctx, user, SearchParams{
 		Query:    "kubernetes ingress controller tls termination",
@@ -183,7 +277,7 @@ func TestSearchBelowThresholdReturnsNothing(t *testing.T) {
 func TestListFiltersByTag(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
-	const user = "a@example.com"
+	user := mustKey(t, s)
 
 	if _, err := s.Write(ctx, user, "ops runbook", []string{"ops"}, nil); err != nil {
 		t.Fatalf("write: %v", err)
@@ -206,5 +300,67 @@ func TestListFiltersByTag(t *testing.T) {
 	}
 	if len(ops) != 1 || ops[0].Content != "ops runbook" {
 		t.Fatalf("tag filter wrong: %+v", ops)
+	}
+}
+
+// TestMemoryCapEviction pins the ring-buffer behaviour: a key keeps only the
+// newest maxMemoriesPerKey memories; older ones are erased as new ones arrive.
+func TestMemoryCapEviction(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	user := mustKey(t, s)
+
+	const total = maxMemoriesPerKey + 5
+	var ids []string
+	for i := 0; i < total; i++ {
+		m, err := s.Write(ctx, user, fmt.Sprintf("memory number %d", i), nil, nil)
+		if err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+		ids = append(ids, m.ID)
+	}
+
+	all, err := s.List(ctx, user, nil, 1000)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(all) != maxMemoriesPerKey {
+		t.Fatalf("want %d memories after writing %d, got %d", maxMemoriesPerKey, total, len(all))
+	}
+
+	present := map[string]bool{}
+	for _, m := range all {
+		present[m.ID] = true
+	}
+	// The 5 oldest were evicted; the newest survived.
+	for i := 0; i < 5; i++ {
+		if present[ids[i]] {
+			t.Fatalf("oldest memory (index %d) should have been evicted", i)
+		}
+	}
+	if !present[ids[total-1]] {
+		t.Fatal("newest memory was evicted")
+	}
+}
+
+// TestEvictionIsPerKey: one key hitting the cap must not evict another key's
+// memories.
+func TestEvictionIsPerKey(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	a, b := mustKey(t, s), mustKey(t, s)
+
+	bMem, err := s.Write(ctx, b, "b's single memory", nil, nil)
+	if err != nil {
+		t.Fatalf("write b: %v", err)
+	}
+	for i := 0; i < maxMemoriesPerKey+5; i++ {
+		if _, err := s.Write(ctx, a, fmt.Sprintf("a memory %d", i), nil, nil); err != nil {
+			t.Fatalf("write a %d: %v", i, err)
+		}
+	}
+
+	if _, err := s.Get(ctx, b, bMem.ID); err != nil {
+		t.Fatalf("b's memory was collaterally evicted by a's writes: %v", err)
 	}
 }
