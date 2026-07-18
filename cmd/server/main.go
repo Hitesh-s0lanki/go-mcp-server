@@ -5,12 +5,15 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Hitesh-s0lanki/go-mcp-server/internal/mcpx"
 
@@ -24,9 +27,43 @@ import (
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	handler := mcpx.Handler(func(path string) {
-		log.Info("mounted namespace", "path", path)
+	// Behind a tunnel or reverse proxy (ngrok, Cloudflare), the Host header is
+	// the public domain while the connection lands on loopback — which the MCP
+	// transport's DNS-rebinding guard rejects with 403. Opt out explicitly.
+	allowExternalHost := envOr("MCP_ALLOW_EXTERNAL_HOST", "") == "true"
+	if allowExternalHost {
+		log.Warn("DNS-rebinding protection disabled; only do this behind a trusted proxy")
+	}
+
+	// Connect to Postgres up front so a bad DATABASE_URL fails at startup rather
+	// than on the first tool call.
+	pool, err := openDB(context.Background(), log)
+	if err != nil {
+		log.Error("database", "err", err)
+		os.Exit(1)
+	}
+	if pool != nil {
+		defer pool.Close()
+	}
+
+	// Signal-scoped context, created before the handler so it can back
+	// namespaces' background work (memory's embedding workers): cancelling it on
+	// SIGINT/SIGTERM stops those goroutines as part of shutdown.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	handler, err := mcpx.Handler(mcpx.Options{
+		Log:               log,
+		AllowExternalHost: allowExternalHost,
+		Deps:              mcpx.Deps{Log: log, DB: pool, Ctx: ctx},
+		OnMount: func(path string) {
+			log.Info("mounted namespace", "path", path)
+		},
 	})
+	if err != nil {
+		log.Error("build handler", "err", err)
+		os.Exit(1)
+	}
 
 	addr := ":" + envOr("PORT", "8080")
 	httpServer := &http.Server{
@@ -35,10 +72,8 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// Graceful shutdown on SIGINT/SIGTERM.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
+	// Graceful shutdown on SIGINT/SIGTERM (ctx is the signal context created
+	// above; cancelling it also stops namespace background workers).
 	go func() {
 		log.Info("listening", "addr", addr)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -62,4 +97,31 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// openDB connects to Postgres and verifies the connection. It returns
+// (nil, nil) when DATABASE_URL is unset, so namespaces that do not need a
+// database still start; those that do will report the missing dependency
+// themselves.
+func openDB(ctx context.Context, log *slog.Logger) (*pgxpool.Pool, error) {
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		log.Warn("DATABASE_URL not set; namespaces requiring Postgres will fail to mount")
+		return nil, nil
+	}
+
+	pool, err := pgxpool.New(ctx, url)
+	if err != nil {
+		return nil, fmt.Errorf("connect: %w", err)
+	}
+
+	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := pool.Ping(pingCtx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ping: %w", err)
+	}
+
+	log.Info("database connected")
+	return pool, nil
 }

@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "memory": {
+      "type": "http",
+      "url": "https://robust-enough-loon.ngrok-free.app/memory/mcp",
+      "headers": {
+        "X-API-Key": "mcp_d398e9b902cc4cf3ab438dbe8cf76715"
+      }
+    },
+    "skills": {
+      "type": "http",
+      "url": "https://robust-enough-loon.ngrok-free.app/skills/mcp"
+    },
+    "event": {
+      "type": "http",
+      "url": "https://robust-enough-loon.ngrok-free.app/event/mcp"
+    }
+  }
+}

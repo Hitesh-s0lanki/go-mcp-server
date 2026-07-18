@@ -1,0 +1,54 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  # Keep the defaults (errcheck, govet, ineffassign, staticcheck, unused)
+  # and add the ones that earn their keep for an HTTP/MCP server.
+  default: standard
+  enable:
+    - bodyclose      # unclosed HTTP response bodies — leaks connections
+    - noctx          # HTTP requests without a context — unkillable requests
+    - errorlint      # error comparison/wrapping mistakes (%w, errors.Is/As)
+    - sloglint       # slog misuse — this project logs with slog
+    - gosec          # common security mistakes
+    - revive         # style; replaces the archived golint
+    - misspell
+    - unconvert      # redundant type conversions
+    - wastedassign
+    - nilerr         # returning nil when err is non-nil
+    - predeclared    # shadowing predeclared identifiers (len, cap, new...)
+    - usetesting     # prefer t.Context()/t.Setenv() over manual equivalents
+
+  settings:
+    revive:
+      rules:
+        - name: exported          # exported symbols need doc comments
+        - name: indent-error-flow
+        - name: unreachable-code
+        - name: redefines-builtin-id
+    sloglint:
+      no-mixed-args: true         # don't mix key-value and attr styles
+      kv-only: true               # this codebase uses log.Info("msg", "k", v)
+    errcheck:
+      check-type-assertions: true
+
+  exclusions:
+    generated: lax
+    rules:
+      # Tests may assert loosely and use weaker crypto/permissions.
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      # Group this module's imports into their own block, after third-party.
+      local-prefixes:
+        - github.com/Hitesh-s0lanki/go-mcp-server

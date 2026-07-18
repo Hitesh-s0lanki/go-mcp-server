@@ -16,13 +16,13 @@ type namespace struct{}
 
 func (namespace) Path() string { return "/skills/mcp" }
 
-func (namespace) Server() *mcp.Server {
+func (namespace) Server(_ *mcpx.Deps) (*mcp.Server, error) {
 	s := mcp.NewServer(&mcp.Implementation{Name: "skills", Version: "0.1.0"}, nil)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "skills_ping",
 		Description: "Dummy tool that confirms the skills namespace is reachable.",
 	}, ping)
-	return s
+	return s, nil
 }
 
 type pingInput struct {
