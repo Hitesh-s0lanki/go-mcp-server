@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "memory": {
+      "type": "http",
+      "url": "https://robust-enough-loon.ngrok-free.app/memory/mcp",
+      "headers": {
+        "X-User-Email": "hiteshsolanki4623@gamil.com"
+      }
+    },
+    "skills": {
+      "type": "http",
+      "url": "https://robust-enough-loon.ngrok-free.app/skills/mcp"
+    },
+    "event": {
+      "type": "http",
+      "url": "https://robust-enough-loon.ngrok-free.app/event/mcp"
+    }
+  }
+}

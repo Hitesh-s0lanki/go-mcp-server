@@ -2,11 +2,14 @@ package mcpx_test
 
 import (
 	"context"
+	"log/slog"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/Hitesh-s0lanki/go-mcp-server/internal/mcpx"
@@ -17,20 +20,39 @@ import (
 	_ "github.com/Hitesh-s0lanki/go-mcp-server/internal/skills"
 )
 
-// TestNamespacesRoundTrip mounts every registered namespace on an httptest
-// server and drives a real MCP client through initialize + tools/call against
-// each one, asserting the dummy tool echoes back.
+// TestNamespacesRoundTrip mounts every registered namespace and drives a real
+// MCP client through initialize + tools/call against the dummy namespaces.
+//
+// It needs a database because the memory namespace refuses to mount without one
+// and Handler fails fast. OPENAI_API_KEY is stubbed: the embedder is constructed
+// at mount time but never called here, since this test only exercises the
+// plumbing. Memory's own behaviour is covered in internal/memory.
 func TestNamespacesRoundTrip(t *testing.T) {
-	namespaces := mcpx.All()
-	if len(namespaces) < 3 {
-		t.Fatalf("want at least 3 namespaces registered, got %d", len(namespaces))
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("DATABASE_URL not set")
+	}
+	t.Setenv("OPENAI_API_KEY", "test-key-not-called")
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	handler, err := mcpx.Handler(mcpx.Options{
+		Log:  slog.New(slog.DiscardHandler),
+		Deps: mcpx.Deps{DB: pool},
+	})
+	if err != nil {
+		t.Fatalf("build handler: %v", err)
 	}
 
-	ts := httptest.NewServer(mcpx.Handler(nil))
+	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
 	cases := map[string]string{
-		"/memory/mcp": "memory_ping",
 		"/skills/mcp": "skills_ping",
 		"/event/mcp":  "event_ping",
 	}
@@ -41,13 +63,12 @@ func TestNamespacesRoundTrip(t *testing.T) {
 			defer cancel()
 
 			client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil)
-			transport := &mcp.StreamableClientTransport{Endpoint: ts.URL + path}
-
-			session, err := client.Connect(ctx, transport, nil)
+			session, err := client.Connect(ctx,
+				&mcp.StreamableClientTransport{Endpoint: ts.URL + path}, nil)
 			if err != nil {
 				t.Fatalf("connect %s: %v", path, err)
 			}
-			defer session.Close()
+			defer func() { _ = session.Close() }()
 
 			res, err := session.CallTool(ctx, &mcp.CallToolParams{
 				Name:      tool,
@@ -59,11 +80,26 @@ func TestNamespacesRoundTrip(t *testing.T) {
 			if res.IsError {
 				t.Fatalf("%s returned tool error: %+v", tool, res.Content)
 			}
-			text := firstText(res)
-			if !strings.Contains(text, "received: hello") {
+			if text := firstText(res); !strings.Contains(text, "received: hello") {
 				t.Fatalf("%s: unexpected reply %q", tool, text)
 			}
 		})
+	}
+}
+
+// TestHandlerFailsWithoutDatabase pins the fail-fast contract: a namespace that
+// cannot build must stop startup, not mount a server that only reveals the
+// problem on the first tool call.
+func TestHandlerFailsWithoutDatabase(t *testing.T) {
+	_, err := mcpx.Handler(mcpx.Options{
+		Log:  slog.New(slog.DiscardHandler),
+		Deps: mcpx.Deps{}, // no DB
+	})
+	if err == nil {
+		t.Fatal("want error when the memory namespace has no database, got nil")
+	}
+	if !strings.Contains(err.Error(), "/memory/mcp") {
+		t.Fatalf("error should name the failing namespace, got: %v", err)
 	}
 }
 

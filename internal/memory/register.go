@@ -1,9 +1,10 @@
-// Package memory hosts the /memory/mcp namespace. For now it exposes a single
-// dummy tool used to verify the server connection end to end.
+// Package memory hosts the /memory/mcp namespace: per-user memories with
+// hybrid (vector + keyword) retrieval backed by Postgres and pgvector.
 package memory
 
 import (
-	"context"
+	"errors"
+	"os"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -16,28 +17,17 @@ type namespace struct{}
 
 func (namespace) Path() string { return "/memory/mcp" }
 
-func (namespace) Server() *mcp.Server {
-	s := mcp.NewServer(&mcp.Implementation{Name: "memory", Version: "0.1.0"}, nil)
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        "memory_ping",
-		Description: "Dummy tool that confirms the memory namespace is reachable.",
-	}, ping)
-	return s
-}
-
-type pingInput struct {
-	Message string `json:"message,omitempty" jsonschema:"optional message to echo back"`
-}
-
-type pingOutput struct {
-	Reply string `json:"reply"`
-}
-
-func ping(_ context.Context, _ *mcp.CallToolRequest, in pingInput) (*mcp.CallToolResult, pingOutput, error) {
-	reply := "pong from memory namespace"
-	if in.Message != "" {
-		reply = "memory received: " + in.Message
+func (namespace) Server(deps *mcpx.Deps) (*mcp.Server, error) {
+	if deps.DB == nil {
+		return nil, errors.New("DATABASE_URL is not set (the memory namespace needs Postgres + pgvector)")
 	}
-	out := pingOutput{Reply: reply}
-	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: reply}}}, out, nil
+
+	emb, err := NewOpenAIEmbedder(os.Getenv("OPENAI_API_KEY"))
+	if err != nil {
+		return nil, err
+	}
+
+	srv := mcp.NewServer(&mcp.Implementation{Name: "memory", Version: "0.1.0"}, nil)
+	registerTools(srv, NewStore(deps.DB, emb))
+	return srv, nil
 }
