@@ -5,7 +5,7 @@ Multi-namespace [Model Context Protocol](https://modelcontextprotocol.io) server
 | Route          | Namespace | Purpose                          |
 | -------------- | --------- | -------------------------------- |
 | `/memory/mcp`  | memory    | Memory storage & recall tools    |
-| `/skills/mcp`  | skills    | Skill loading & discovery tools  |
+| `/skills/mcp`  | skills    | Web search & scrape (Firecrawl)  |
 | `/event/mcp`   | event     | Event-related tools              |
 
 Namespaces self-register at startup, so adding a new one is a single package with an `init()` — `main.go` never changes. Router is stdlib `net/http`; a domain never reaches across another domain except through `internal/mcpx`.
@@ -23,15 +23,54 @@ Namespaces self-register at startup, so adding a new one is a single package wit
 cmd/server/main.go     # config, graceful shutdown
 internal/
   mcpx/                # registry, Handler(), Chain(); integration test
-  memory/              # register.go  (dummy memory_ping tool)
-  skills/              # register.go  (dummy skills_ping tool)
+  memory/              # per-user memories, hybrid RAG (Postgres + pgvector)
+  skills/              # skills_find agent + skills_download + web primitives
   event/               # register.go  (dummy event_ping tool)
 ```
 
-Each namespace currently exposes one dummy `*_ping` tool for verifying the
-connection. `internal/mcpx/integration_test.go` drives a real MCP client
-through `initialize` + `tools/call` against all three over an in-process
+`internal/mcpx/integration_test.go` drives a real MCP client through
+`initialize` + `tools/call` against the namespaces over an in-process
 Streamable HTTP server.
+
+### skills namespace
+
+An on-demand skill agent, a complete-skill downloader, and the raw web
+primitives they are built on. **Nothing is stored** — every call reflects live
+GitHub, so the catalogue is always current and the server holds no skill data.
+
+- **`skills_find`** — the headline tool, and the go-to for obtaining *any* skill.
+  Give it a natural-language requirement ("edit a PDF form", "build an MCP
+  server") and it runs a live OpenAI tool-calling loop over the Firecrawl tools:
+  search GitHub → pick the best Agent Skill → fetch its full `SKILL.md` → return
+  the complete, ready-to-use skill with source links. Pass **multiple**
+  requirements via `requirements: [...]` and they are resolved **in parallel**
+  (one agent each, bounded fan-out), so batching is much faster than one call
+  per need.
+- **`skills_download`** — once you've located a skill, this downloads the
+  **whole package**: every file in the skill folder (`SKILL.md` + scripts +
+  reference files, recursively) via the GitHub contents API, fetched
+  concurrently. Takes a GitHub URL (repo/tree/blob/raw) or `owner/repo/path`.
+- **`firecrawl_search`** — web search returning ranked results (url, title,
+  description); set `scrape=true` to also inline each page as markdown.
+- **`firecrawl_scrape`** — fetch one URL as clean markdown (optionally raw HTML).
+
+```
+skills_find(requirements[])          skills_download(source)
+   │  one OpenAI agent per need          │  GitHub contents API
+   │  (parallel, bounded)                ├─ list skill dir (recursive)
+   ├─▶ search_github ─┐                  └─ fetch every raw file (concurrent)
+   └─▶ fetch_url ─────┴ Firecrawl        ▼
+   ▼                                  complete skill: all files, in full
+complete SKILL.md + sources
+```
+
+Config: `FIRECRAWL_API_KEY` powers the web tools (optional — without it Firecrawl
+uses a lower unauthenticated rate limit, so those tools mount either way).
+`skills_find` additionally needs `OPENAI_API_KEY` (and honours
+`SKILLS_AGENT_MODEL`, default `gpt-4o-mini`); it is skipped when that key is
+absent. `skills_download` needs no key — an optional `GITHUB_TOKEN` just raises
+GitHub's unauthenticated rate limit. None are hard startup dependencies (unlike
+memory, which requires Postgres).
 
 ## Quick start
 
