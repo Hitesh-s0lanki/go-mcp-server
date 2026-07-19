@@ -42,6 +42,16 @@ linters:
         linters:
           - gosec
           - errcheck
+      # skills web clients: both talk to fixed API hosts (const roots) and are
+      # hardened against SSRF in code — Firecrawl carries the user target in the
+      # JSON body (never the URL); the GitHub downloader path-escapes every
+      # segment and guards raw fetches to *.githubusercontent.com. gosec's G704
+      # taint analysis still flags the outbound calls, so scope the suppression to
+      # these two files.
+      - path: internal/skills/(firecrawl|github)\.go
+        linters:
+          - gosec
+        text: "G704"
 
 formatters:
   enable:
