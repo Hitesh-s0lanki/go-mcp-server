@@ -209,6 +209,73 @@ func TestRequireAPIKey(t *testing.T) {
 	})
 }
 
+// TestKeyAPIRequiresClerk pins the second admission model: when a Clerk secret
+// is configured the key-management API mounts, and it is gated by Clerk (a
+// caller with no bearer token is rejected) rather than by X-API-Key. The MCP
+// namespaces keep their own X-API-Key admission, unaffected.
+func TestKeyAPIRequiresClerk(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("DATABASE_URL not set")
+	}
+	t.Setenv("OPENAI_API_KEY", "test-key-not-called")
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	handler, err := mcpx.Handler(mcpx.Options{
+		Log:            slog.New(slog.DiscardHandler),
+		ClerkSecretKey: "sk_test_dummy", // mounts /api/keys; never verifies here
+		Deps:           mcpx.Deps{DB: pool},
+	})
+	if err != nil {
+		t.Fatalf("build handler: %v", err)
+	}
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	// No Clerk token -> 401, before any JWKS fetch. An X-API-Key is not accepted
+	// here: this route uses the Clerk model, not admission-key.
+	if got := status(t, auth.GenerateKey(), http.MethodGet, ts.URL+"/api/keys"); got != http.StatusUnauthorized {
+		t.Errorf("GET /api/keys without a Clerk token: got %d, want 401", got)
+	}
+}
+
+// TestKeyAPIDisabledWithoutClerk confirms the API is absent (404) when no Clerk
+// secret is configured, so the server runs MCP-only without it.
+func TestKeyAPIDisabledWithoutClerk(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("DATABASE_URL not set")
+	}
+	t.Setenv("OPENAI_API_KEY", "test-key-not-called")
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	handler, err := mcpx.Handler(mcpx.Options{
+		Log:  slog.New(slog.DiscardHandler),
+		Deps: mcpx.Deps{DB: pool}, // no ClerkSecretKey
+	})
+	if err != nil {
+		t.Fatalf("build handler: %v", err)
+	}
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	if got := status(t, "", http.MethodGet, ts.URL+"/api/keys"); got != http.StatusNotFound {
+		t.Errorf("GET /api/keys with Clerk disabled: got %d, want 404", got)
+	}
+}
+
 // healthzPath mirrors the unauthenticated liveness route in registry.go.
 const healthzPath = "/healthz"
 

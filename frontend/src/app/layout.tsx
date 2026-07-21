@@ -2,11 +2,14 @@ import type { Metadata } from "next";
 import { Inter, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
+import { PostHogProvider } from "@/components/posthog-provider";
+import { ClerkProvider } from "@/components/clerk-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
+import { Analytics } from "@vercel/analytics/next";
 
-// Inter: the body + heading typeface, matching docs.firecrawl.dev. Loaded as a
-// variable font so the full 100 to 900 weight range and italics are available.
+// Inter: the body + heading typeface. Loaded as a variable font so the full
+// 100 to 900 weight range and italics are available.
 const inter = Inter({
   variable: "--font-sans",
   subsets: ["latin"],
@@ -15,8 +18,8 @@ const inter = Inter({
   style: ["normal", "italic"],
 });
 
-// Monospace for code blocks and inline code (paperMono on Firecrawl is
-// proprietary; Geist Mono is a clean, close open-source stand-in).
+// Monospace for code blocks and inline code (Geist Mono: a clean, open-source
+// choice that pairs well with Inter).
 const geistMono = Geist_Mono({
   variable: "--font-mono",
   subsets: ["latin"],
@@ -47,9 +50,14 @@ export default function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
-          <TooltipProvider>{children}</TooltipProvider>
+          <ClerkProvider>
+            <PostHogProvider>
+              <TooltipProvider>{children}</TooltipProvider>
+            </PostHogProvider>
+          </ClerkProvider>
           <Toaster />
         </ThemeProvider>
+        <Analytics />
       </body>
     </html>
   );

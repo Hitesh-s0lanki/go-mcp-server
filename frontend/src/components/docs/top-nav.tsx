@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Menu } from "lucide-react";
+import { UserButton, useUser } from "@clerk/nextjs";
+import { KeyRound, Menu } from "lucide-react";
 import { topNav } from "@/lib/docs";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -17,6 +18,7 @@ import { ThemeToggle } from "./theme-toggle";
 export function TopNav() {
   const pathname = usePathname();
   const current = pathname.split("/")[2] ?? "overview";
+  const { isSignedIn } = useUser();
 
   return (
     <header className="sticky top-0 z-40 border-b bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -79,6 +81,21 @@ export function TopNav() {
               />
             </a>
           </Button>
+          {isSignedIn ? (
+            <>
+              <Button variant="ghost" size="sm" asChild className="hidden sm:inline-flex">
+                <Link href="/doc/keys">
+                  <KeyRound className="size-4" />
+                  API keys
+                </Link>
+              </Button>
+              <UserButton />
+            </>
+          ) : (
+            <Button variant="ghost" size="sm" asChild className="hidden sm:inline-flex">
+              <Link href="/sign-in">Sign in</Link>
+            </Button>
+          )}
         </div>
       </div>
     </header>

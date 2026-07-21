@@ -13,6 +13,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/Hitesh-s0lanki/go-mcp-server/internal/auth"
+	"github.com/Hitesh-s0lanki/go-mcp-server/internal/clerkauth"
+	"github.com/Hitesh-s0lanki/go-mcp-server/internal/keysapi"
 )
 
 // healthzPath is the liveness endpoint. It is exempt from authentication so an
@@ -83,7 +85,15 @@ type Options struct {
 	// See https://modelcontextprotocol.io/specification/2025-11-25/basic/security_best_practices
 	AllowExternalHost bool
 
-	// OnMount is called once per namespace after it is mounted. Optional.
+	// ClerkSecretKey enables the Clerk-authenticated key-management API at
+	// /api/keys (list/create/delete a signed-in user's keys). When empty, that
+	// API is not mounted and the server serves only the MCP namespaces —
+	// key minting then falls to `make apikey`. The MCP namespaces themselves do
+	// not use Clerk; they admit callers by X-API-Key regardless of this value.
+	ClerkSecretKey string
+
+	// OnMount is called once per namespace (and the key API) after it is mounted.
+	// Optional.
 	OnMount func(path string)
 }
 
@@ -113,26 +123,50 @@ func Handler(opts Options) (http.Handler, error) {
 		DisableLocalhostProtection: opts.AllowExternalHost,
 	}
 
+	// One resolver, shared by the admission middleware wrapping each namespace.
+	// It caches key -> id, so the per-namespace checks reuse the same warm cache.
+	requireKey := RequireAPIKey(auth.NewResolver(deps.DB), log)
+
+	// Admission is applied per route rather than to the whole mux so the
+	// namespaces (X-API-Key) and the key-management API (Clerk) can each carry
+	// their own auth. deps.DB is non-nil here: the memory namespace refuses to
+	// build without it and the loop below fails fast, so there is no
+	// unauthenticated fallback path.
 	for _, ns := range All() {
 		srv, err := ns.Server(&deps)
 		if err != nil {
 			return nil, fmt.Errorf("namespace %s: %w", ns.Path(), err)
 		}
-		mux.Handle(ns.Path(), mcp.NewStreamableHTTPHandler(
+		mux.Handle(ns.Path(), requireKey(mcp.NewStreamableHTTPHandler(
 			func(*http.Request) *mcp.Server { return srv }, streamOpts,
-		))
+		)))
 		if opts.OnMount != nil {
 			opts.OnMount(ns.Path())
 		}
 	}
 
-	// Auth runs after logging so a rejected request still leaves a trace, and
-	// inside Recover so a panic in the check is still contained. deps.DB is
-	// non-nil here: the memory namespace refuses to build without it and the
-	// loop above fails fast, so there is no unauthenticated fallback path.
+	// The dashboard's key-management API: Clerk-authenticated, owner-scoped, and
+	// only mounted when a Clerk secret is configured. Its identity model is
+	// entirely separate from the X-API-Key admission above — here we prove which
+	// human is calling so keys can be scoped and capped per Clerk user.
+	if opts.ClerkSecretKey != "" {
+		authn, err := clerkauth.New(opts.ClerkSecretKey, log)
+		if err != nil {
+			return nil, fmt.Errorf("key-management api: %w", err)
+		}
+		keys := keysapi.NewHandler(keysapi.NewStore(deps.DB), log)
+		mux.Handle("GET /api/keys", authn.RequireUser(http.HandlerFunc(keys.List)))
+		mux.Handle("POST /api/keys", authn.RequireUser(http.HandlerFunc(keys.Create)))
+		mux.Handle("DELETE /api/keys/{id}", authn.RequireUser(http.HandlerFunc(keys.Delete)))
+		if opts.OnMount != nil {
+			opts.OnMount("/api/keys")
+		}
+	}
+
+	// Logging and panic recovery stay global: every route (healthz, namespaces,
+	// key API) is logged and contained. Auth is already applied per route above.
 	return Chain(mux,
 		Recover(log),
 		LogRequests(log),
-		RequireAPIKey(auth.NewResolver(deps.DB), log, healthzPath),
 	), nil
 }

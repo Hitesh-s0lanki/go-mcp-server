@@ -54,12 +54,21 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// CLERK_SECRET_KEY, when set, mounts the Clerk-authenticated key-management
+	// API (/api/keys) the web dashboard calls. Without it the server serves only
+	// the MCP namespaces and keys are minted via `make apikey`.
+	clerkSecretKey := os.Getenv("CLERK_SECRET_KEY")
+	if clerkSecretKey == "" {
+		log.Warn("CLERK_SECRET_KEY not set; key-management API (/api/keys) disabled")
+	}
+
 	handler, err := mcpx.Handler(mcpx.Options{
 		Log:               log,
 		AllowExternalHost: allowExternalHost,
+		ClerkSecretKey:    clerkSecretKey,
 		Deps:              mcpx.Deps{Log: log, DB: pool, Ctx: ctx},
 		OnMount: func(path string) {
-			log.Info("mounted namespace", "path", path)
+			log.Info("mounted route", "path", path)
 		},
 	})
 	if err != nil {

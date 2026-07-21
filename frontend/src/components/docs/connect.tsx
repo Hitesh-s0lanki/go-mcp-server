@@ -1,6 +1,7 @@
 import { servers } from "@/lib/docs";
 import { mcpUrl } from "@/lib/mcp";
 import { CopyButton } from "./copy-button";
+import { ApiKeyCallout } from "./api-key-callout";
 
 /**
  * Renders connection URL cards for one or more namespaces. Each URL is built
@@ -10,6 +11,7 @@ import { CopyButton } from "./copy-button";
 export function Connect({ serverKeys }: { serverKeys: string[] }) {
   return (
     <div className="not-prose my-6 grid gap-3">
+      <ApiKeyCallout />
       {serverKeys.map((key) => {
         const s = servers[key];
         if (!s) return null;

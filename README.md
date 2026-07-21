@@ -12,6 +12,67 @@ Multi-namespace [Model Context Protocol](https://modelcontextprotocol.io) server
 
 Namespaces self-register at startup, so adding a new one is a single package with an `init()` — `main.go` never changes. Router is stdlib `net/http`; a domain never reaches across another domain except through `internal/mcpx`.
 
+## Architecture
+
+Two things are worth seeing before the section-by-section detail: **how a request flows** at runtime, and **how the namespaces get mounted** at startup.
+
+### Request lifecycle
+
+Every request passes global middleware (panic recovery, then logging), hits the stdlib mux, and is admitted by the auth that belongs to *that route* — `X-API-Key` for the MCP namespaces, Clerk for the dashboard's key API, nothing for the liveness probe. Auth is per-route, not global, so a namespace can't forget it and `/healthz` never needs a credential.
+
+```mermaid
+flowchart TD
+    C["MCP client / browser<br/>(sends X-API-Key)"]
+
+    C --> R["Recover&nbsp;·&nbsp;panic → 500"]
+    R --> L["LogRequests&nbsp;·&nbsp;arrival + completion"]
+    L --> MUX{"net/http mux<br/>route match"}
+
+    MUX -->|"GET /healthz"| HZ["200 ok · no auth"]
+    MUX -->|"/*/mcp"| AK{"RequireAPIKey<br/>key in api_keys?"}
+    MUX -->|"/api/keys"| CK{"Clerk RequireUser<br/>signed-in human?"}
+
+    AK -->|"missing / unknown → 401"| X1["reject"]
+    CK -->|"no session → 401"| X2["reject"]
+
+    AK -->|"ok"| NS
+    CK -->|"ok"| KEYS["keysapi<br/>list / create / delete<br/>(owner-scoped)"]
+
+    subgraph NS["Namespace MCP servers · Streamable HTTP"]
+        MEM["/memory/mcp<br/><i>also scopes rows to key id</i>"]
+        SK["/skills/mcp"]
+        EV["/event/mcp"]
+        GSC["/gsc/mcp"]
+        PH["/producthunt/mcp"]
+    end
+
+    NS --> TOOL["tools/call → handler"]
+```
+
+`RequireAPIKey` only *admits* the caller. The **memory** namespace additionally resolves the same key to an `api_key_id` to scope every row — identity, not admission — reusing the resolver's warm cache so the second lookup is a map hit. See [§ Auth](#auth).
+
+### Startup & self-registration
+
+Each domain package calls `mcpx.Register` from its `init()`, so importing the package is enough to enroll its namespace. `mcpx.Handler` then builds every registered server, **failing fast** if any can't (missing dependency, bad config) rather than mounting a half-working server that only breaks on the first tool call. `cmd/server/main.go` never enumerates namespaces — adding one is a new package plus a blank import.
+
+```mermaid
+flowchart LR
+    subgraph INIT["package init() · self-register"]
+        A["memory"]
+        B["skills"]
+        D["event"]
+        E["gsc"]
+        F["producthunt"]
+    end
+
+    A & B & D & E & F -->|"mcpx.Register(ns)"| REG["mcpx registry"]
+
+    MAIN["cmd/server/main.go"] --> H["mcpx.Handler(opts)"]
+    REG --> H
+    H --> BUILD["ns.Server(deps)<br/>for each namespace<br/><i>fail fast on error</i>"]
+    BUILD --> MOUNT["mux.Handle(path,<br/>RequireAPIKey(server))"]
+```
+
 ## Stack
 
 - **Go 1.26+**
@@ -92,9 +153,9 @@ Config: `FIRECRAWL_API_KEY` powers the web tools (optional — without it Firecr
 uses a lower unauthenticated rate limit, so those tools mount either way).
 `skills_find` additionally needs `OPENAI_API_KEY` (and honours
 `SKILLS_AGENT_MODEL`, default `gpt-4o-mini`); it is skipped when that key is
-absent. `skills_download` needs no key — an optional `GITHUB_TOKEN` just raises
-GitHub's unauthenticated rate limit. None are hard startup dependencies (unlike
-memory, which requires Postgres).
+absent. `skills_download` needs no key — it reads public repos through GitHub's
+public API unauthenticated. None are hard startup dependencies (unlike memory,
+which requires Postgres).
 
 ### gsc namespace — Google Search Console
 
@@ -183,9 +244,9 @@ API secret = password), TLS with system roots.
 
 | Tool | Purpose |
 | --- | --- |
-| `event_capabilities` | Config + readiness (broker, auth, default group/topic, admin gate) + tool catalogue. No network. Call first if a tool errors. |
-| `event_publish` | Produce one message (`topic`, `key`, `value`, `headers`). Returns the partition + offset it landed at. |
-| `event_consume` | Bounded poll: read up to `max` messages within `timeout_ms`. `from=group` (default) uses a durable consumer group whose offsets advance across calls; `earliest`/`latest` peek partition 0. |
+| `event_capabilities` | Config + readiness (broker, auth, default group/topic, admin gate, owner-scoping) + tool catalogue. No network. Call first if a tool errors. |
+| `event_publish` | Produce one message (`topic`, `key`, `value`, `headers`). Stamps the caller's `api_key_id` as an authoritative `x-mcp-owner` header. Returns the partition + offset + `owner`. |
+| `event_consume` | Bounded poll: read up to `max` messages within `timeout_ms`. **Returns only the caller's own events** — the group is per-caller and every record is validated against the caller's `x-mcp-owner`. `from=group` (default) advances a durable per-caller cursor; `earliest`/`latest` peek partition 0. |
 | `event_topics` | List topics + partition counts (read-only). |
 | `event_create_topic` / `event_delete_topic` | Topic admin — gated behind `KAFKA_ALLOW_TOPIC_ADMIN`. |
 
@@ -208,6 +269,19 @@ gsc and producthunt (and unlike memory), missing config is **not** a startup
 failure: the namespace always mounts and each tool reports the problem;
 `event_capabilities` surfaces the status. On Confluent Cloud, created topics must
 use replication factor 3 (the default).
+
+**Per-caller event scoping.** Like memory, event resolves the `X-API-Key` to a
+non-secret `api_key_id` and treats it as the event's *owner*. `event_publish`
+stamps that id on every record as an authoritative `x-mcp-owner` header (any
+client-supplied owner header is stripped, so ownership cannot be forged);
+`event_consume` reads a per-caller consumer group (`<group>.<api_key_id>`, an
+isolated cursor) and returns only records whose owner matches — other users'
+events on a shared topic are committed past but never surfaced. This makes each
+event unique to its user: the same key that admits the request is what scopes
+what it can read. The credential itself is never written to a record — only the
+`api_key_id`. Scoping needs `DATABASE_URL` (the `api_keys` resolver); without it
+publish/consume report the missing dependency rather than serving events
+unscoped.
 
 ## Frontend
 

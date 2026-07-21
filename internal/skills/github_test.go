@@ -65,7 +65,7 @@ func TestDownloadRecursiveConcurrent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d := NewDownloader("")
+	d := NewDownloader()
 	d.apiBase = srv.URL
 	d.skipHostCheck = true // test stub isn't on githubusercontent.com
 
@@ -94,7 +94,7 @@ func TestDownloadRecursiveConcurrent(t *testing.T) {
 
 // TestDownloadRejectsNonGithubHost pins the SSRF guard on raw fetches.
 func TestDownloadRejectsNonGithubHost(t *testing.T) {
-	d := NewDownloader("")
+	d := NewDownloader()
 	if _, err := d.fetchRaw(context.Background(), "https://evil.example.com/x"); err == nil {
 		t.Fatal("want refusal for non-github host, got nil")
 	}

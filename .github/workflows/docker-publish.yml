@@ -1,0 +1,127 @@
+name: Docker Publish
+
+on:
+  push:
+    branches:
+      - main
+      - release
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+# One publish per branch at a time; let a newer push supersede an in-flight one.
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Test, Build, Push, and Deploy
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    env:
+      RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+
+      - name: Run tests
+        run: go test ./... -race -count=1
+
+      - name: Prepare image tags
+        id: image
+        shell: bash
+        run: |
+          IMAGE="${REGISTRY}/${GITHUB_REPOSITORY,,}"
+          SAFE_BRANCH="$(echo "${GITHUB_REF_NAME}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_.-]+/-/g' | sed -E 's/^-+|-+$//g')"
+          SHA_TAG="${IMAGE}:sha-${GITHUB_SHA}"
+          TAGS="${SHA_TAG}"$'\n'"${IMAGE}:${SAFE_BRANCH}"
+
+          # main -> :latest, release -> :prod, matching the deploy convention.
+          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            TAGS="${TAGS}"$'\n'"${IMAGE}:latest"
+          fi
+          if [[ "${GITHUB_REF_NAME}" == "release" ]]; then
+            TAGS="${TAGS}"$'\n'"${IMAGE}:prod"
+          fi
+
+          {
+            echo "name=${IMAGE}"
+            echo "primary_tag=${SHA_TAG}"
+            echo "tags<<EOF"
+            echo "${TAGS}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.image.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Optional: fire a Render deploy hook with the immutable sha tag. Skipped
+      # cleanly until the RENDER_DEPLOY_HOOK_URL secret is configured.
+      - name: Trigger Render deploy
+        if: env.RENDER_DEPLOY_HOOK_URL != ''
+        env:
+          IMAGE_URL: ${{ steps.image.outputs.primary_tag }}
+        shell: bash
+        run: |
+          ENCODED_IMAGE_URL="$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["IMAGE_URL"], safe=""))')"
+          SEPARATOR="?"
+          if [[ "${RENDER_DEPLOY_HOOK_URL}" == *"?"* ]]; then
+            SEPARATOR="&"
+          fi
+          curl -fsS -X POST "${RENDER_DEPLOY_HOOK_URL}${SEPARATOR}imgURL=${ENCODED_IMAGE_URL}"
+
+      - name: Summarize deployment artifact
+        env:
+          IMAGE_URL: ${{ steps.image.outputs.primary_tag }}
+        shell: bash
+        run: |
+          {
+            echo "### Docker image"
+            echo ""
+            echo "- Image: \`${{ steps.image.outputs.name }}\`"
+            echo "- Deployable tag: \`${IMAGE_URL}\`"
+            echo ""
+            if [[ -n "${RENDER_DEPLOY_HOOK_URL}" ]]; then
+              echo "Render deploy hook was triggered with the deployable tag."
+            else
+              echo "Render deploy was skipped because \`RENDER_DEPLOY_HOOK_URL\` is not configured yet."
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"

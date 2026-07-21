@@ -26,26 +26,25 @@ func (namespace) Server(deps *mcpx.Deps) (*mcp.Server, error) {
 		Description: "Dummy tool that confirms the skills namespace is reachable.",
 	}, ping)
 
-	// Firecrawl works without a key at a lower rate limit, so a missing key is
-	// not fatal -- unlike memory's database. Warn once at mount so the reduced
-	// limit is not a surprise, then register the tools regardless.
+	// The web search/scrape client is an internal dependency of the skills_find
+	// agent, not an exposed tool -- callers reach it only through skills_find.
+	// It works without a key at a lower rate limit, so a missing one is not
+	// fatal; warn once at mount so the reduced limit is not a surprise.
 	key := os.Getenv("FIRECRAWL_API_KEY")
 	if key == "" && deps.Log != nil {
-		deps.Log.Warn("FIRECRAWL_API_KEY not set; skills web tools will use Firecrawl's unauthenticated rate limit")
+		deps.Log.Warn("FIRECRAWL_API_KEY not set; skills web search/scrape will use the unauthenticated rate limit")
 	}
-	fc := NewFirecrawl(key)
-	registerFirecrawlTools(s, fc)
+	web := NewFirecrawl(key)
 
-	// The downloader needs no model or key (optional GITHUB_TOKEN just raises the
-	// rate limit), so it is always available.
-	registerDownloadTool(s, NewDownloader(os.Getenv("GITHUB_TOKEN")))
+	// The downloader needs no model or key -- it reads public repos through
+	// GitHub's public API unauthenticated -- so it is always available.
+	registerDownloadTool(s, NewDownloader())
 
-	// The on-demand skill finder drives an OpenAI tool-calling loop over the
-	// Firecrawl tools, so it needs a chat model. Register it only when a key is
-	// present; the Firecrawl primitives above stand alone without one.
+	// skills_find drives an OpenAI tool-calling loop over the web client above,
+	// so it needs a chat model. Register it only when a key is present.
 	if openaiKey := os.Getenv("OPENAI_API_KEY"); openaiKey != "" {
 		chat := NewOpenAIChat(openaiKey, os.Getenv("SKILLS_AGENT_MODEL"))
-		registerFindTool(s, &SkillFinder{Chat: chat, FC: fc})
+		registerFindTool(s, &SkillFinder{Chat: chat, FC: web})
 	} else if deps.Log != nil {
 		deps.Log.Warn("OPENAI_API_KEY not set; skills_find (on-demand skill agent) is disabled")
 	}

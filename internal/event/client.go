@@ -22,10 +22,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	kafka "github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl/plain"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/Hitesh-s0lanki/go-mcp-server/internal/auth"
 )
 
 const (
@@ -48,6 +51,12 @@ type Client struct {
 	transport *kafka.Transport
 	// dialer carries SASL/TLS for the per-call consumer readers.
 	dialer *kafka.Dialer
+
+	// keys resolves the caller's X-API-Key to its api_key_id, which owns the
+	// events it publishes and is the only owner it may consume. Nil when no
+	// database is configured; callerScope then fails closed rather than serving
+	// unscoped events. The resolver memoizes, so per-call lookups are map hits.
+	keys keyResolver
 
 	brokers []string
 	// bootstrap is the broker list joined for display in capabilities. Broker
@@ -75,7 +84,7 @@ type Client struct {
 // the Namespace interface has no teardown hook, so a goroutine closes idle
 // broker connections when the process context is cancelled — the same technique
 // memory uses to tie its workers to shutdown.
-func NewClient(ctx context.Context, log *slog.Logger) *Client {
+func NewClient(ctx context.Context, db *pgxpool.Pool, log *slog.Logger) *Client {
 	c := &Client{
 		brokers:         splitList(os.Getenv("KAFKA_BOOTSTRAP_SERVERS")),
 		defaultGroup:    firstNonEmpty(os.Getenv("KAFKA_CONSUMER_GROUP"), defaultConsumerGroup),
@@ -84,6 +93,14 @@ func NewClient(ctx context.Context, log *slog.Logger) *Client {
 		log:             log,
 	}
 	c.bootstrap = strings.Join(c.brokers, ",")
+
+	// The api-key resolver is what makes events per-user: it turns the caller's
+	// key into the api_key_id stamped on published events and matched on consume.
+	// A nil db (no DATABASE_URL) leaves keys nil and callerScope fails closed, so
+	// no request can read events unscoped.
+	if db != nil {
+		c.keys = auth.NewResolver(db)
+	}
 
 	key := os.Getenv("KAFKA_API_KEY")
 	secret := os.Getenv("KAFKA_API_SECRET")
@@ -133,6 +150,44 @@ func (c *Client) ready() error {
 	return nil
 }
 
+// callerScope resolves the request's X-API-Key into the api_key_id that owns
+// the events it produces and is the only owner it may consume. It fails closed:
+// a missing/malformed key, an unregistered key, or an absent resolver all return
+// an error rather than falling through to a shared or unscoped view of events.
+func (c *Client) callerScope(ctx context.Context, req *mcp.CallToolRequest) (string, error) {
+	key, err := callerKey(req)
+	if err != nil {
+		return "", err
+	}
+	if c.keys == nil {
+		return "", fmt.Errorf("event ownership scoping is unavailable: no api-key resolver is configured (set DATABASE_URL)")
+	}
+	return c.keys.Resolve(ctx, key)
+}
+
+// stampOwner builds the record headers for a published event: the caller's
+// string headers plus an authoritative owner header. Any caller-supplied header
+// named ownerHeader is dropped first, so a client cannot forge ownership of an
+// event by presenting its own owner header.
+func stampOwner(headers map[string]string, ownerID string) []kafka.Header {
+	out := make([]kafka.Header, 0, len(headers)+1)
+	for k, v := range headers {
+		if k == ownerHeader {
+			continue
+		}
+		out = append(out, kafka.Header{Key: k, Value: []byte(v)})
+	}
+	out = append(out, kafka.Header{Key: ownerHeader, Value: []byte(ownerID)})
+	return out
+}
+
+// scopedGroup derives a per-owner consumer group from the requested base group.
+// Each owner gets an independent cursor over the shared topic, so one user's
+// reads never advance (or drain) another user's offsets -- the offset half of
+// "unique event for unique user"; the owner-header filter on consume is the
+// payload half.
+func scopedGroup(base, ownerID string) string { return base + "." + ownerID }
+
 // requireTopicAdmin returns an error unless topic create/delete are enabled.
 func (c *Client) requireTopicAdmin(op string) error {
 	if !c.allowTopicAdmin {
@@ -146,7 +201,7 @@ func (c *Client) requireTopicAdmin(op string) error {
 // current partitions (same key -> same partition), then produces via the
 // low-level Client.Produce so the assigned offset is returned truthfully — the
 // high-level batching Writer does not surface it.
-func (c *Client) produce(ctx context.Context, topic, key, value string, headers map[string]string) (int, int64, error) {
+func (c *Client) produce(ctx context.Context, topic, key, value string, headers map[string]string, ownerID string) (int, int64, error) {
 	parts, err := c.partitionIDs(ctx, topic)
 	if err != nil {
 		return 0, 0, err
@@ -164,7 +219,7 @@ func (c *Client) produce(ctx context.Context, topic, key, value string, headers 
 	rec := kafka.Record{
 		Key:     kafka.NewBytes(keyBytes),
 		Value:   kafka.NewBytes([]byte(value)),
-		Headers: toKafkaHeaders(headers),
+		Headers: stampOwner(headers, ownerID),
 	}
 	resp, err := c.kc.Produce(ctx, &kafka.ProduceRequest{
 		Topic:        topic,
