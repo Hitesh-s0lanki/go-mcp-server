@@ -20,7 +20,7 @@ export function Connect({ serverKeys }: { serverKeys: string[] }) {
         return (
           <div
             key={key}
-            className="flex items-center gap-3 rounded-xl border bg-card px-4 py-3"
+            className="flex min-w-0 items-center gap-3 rounded-xl border bg-card px-4 py-3"
           >
             <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
               <Icon className="size-4.5 text-foreground/70" />
