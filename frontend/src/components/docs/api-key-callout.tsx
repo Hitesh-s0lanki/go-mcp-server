@@ -18,7 +18,7 @@ export function ApiKeyCallout() {
   const { isSignedIn } = useUser();
 
   return (
-    <div className="not-prose flex flex-col gap-3 rounded-xl border bg-card p-4 sm:flex-row sm:items-center">
+    <div className="not-prose flex min-w-0 flex-col gap-3 rounded-xl border bg-card p-4 sm:flex-row sm:items-center">
       <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
         <KeyRound className="size-4.5 text-foreground/70" />
       </div>
