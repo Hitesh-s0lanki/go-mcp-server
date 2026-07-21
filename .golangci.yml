@@ -36,6 +36,10 @@ linters:
 
   exclusions:
     generated: lax
+    paths:
+      # The web frontend vendors a JS toolchain under node_modules that happens
+      # to ship a stray Go file; it is not part of this module.
+      - frontend
     rules:
       # Tests may assert loosely and use weaker crypto/permissions.
       - path: _test\.go

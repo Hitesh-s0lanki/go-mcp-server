@@ -5,13 +5,15 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/Hitesh-s0lanki/go-mcp-server/internal/auth"
 )
 
 func TestGenerateAPIKeyFormat(t *testing.T) {
 	seen := map[string]bool{}
 	for i := 0; i < 100; i++ {
 		k := GenerateAPIKey()
-		if !keyPattern.MatchString(k) {
+		if !auth.ValidFormat(k) {
 			t.Fatalf("generated key %q does not match mcp_<32 hex>", k)
 		}
 		if seen[k] {
