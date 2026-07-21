@@ -54,7 +54,7 @@ func TestNewClientConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			setKafkaEnv(t, tt.env)
-			c := NewClient(context.Background(), nil)
+			c := NewClient(context.Background(), nil, nil)
 
 			if got := c.ready() == nil; got != tt.wantConfigured {
 				t.Fatalf("ready()==nil = %v, want %v (err=%v)", got, tt.wantConfigured, c.err)
@@ -76,7 +76,7 @@ func TestNewClientDefaults(t *testing.T) {
 		"KAFKA_API_KEY":           "KEY",
 		"KAFKA_API_SECRET":        "SECRET",
 	})
-	c := NewClient(context.Background(), nil)
+	c := NewClient(context.Background(), nil, nil)
 
 	if c.defaultGroup != defaultConsumerGroup {
 		t.Errorf("defaultGroup = %q, want %q", c.defaultGroup, defaultConsumerGroup)
@@ -96,7 +96,7 @@ func TestCapabilitiesNeverLeaksSecret(t *testing.T) {
 		"KAFKA_API_SECRET":        secret,
 		"KAFKA_ALLOW_TOPIC_ADMIN": "true",
 	})
-	c := NewClient(context.Background(), nil)
+	c := NewClient(context.Background(), nil, nil)
 
 	_, out, err := c.capabilities(context.Background(), nil, struct{}{})
 	if err != nil {
@@ -116,7 +116,7 @@ func TestCapabilitiesNeverLeaksSecret(t *testing.T) {
 
 func TestCapabilitiesUnconfigured(t *testing.T) {
 	setKafkaEnv(t, nil)
-	c := NewClient(context.Background(), nil)
+	c := NewClient(context.Background(), nil, nil)
 
 	_, out, err := c.capabilities(context.Background(), nil, struct{}{})
 	if err != nil {
@@ -138,7 +138,7 @@ func TestCapabilitiesUnconfigured(t *testing.T) {
 // IsError result (not a transport error) when Kafka is not configured.
 func TestToolsReportErrorWhenUnconfigured(t *testing.T) {
 	setKafkaEnv(t, nil)
-	c := NewClient(context.Background(), nil)
+	c := NewClient(context.Background(), nil, nil)
 	ctx := context.Background()
 
 	if res, _, err := c.publish(ctx, nil, publishInput{Topic: "t", Value: "v"}); err != nil || !res.IsError {
@@ -161,7 +161,7 @@ func TestValidationErrors(t *testing.T) {
 		"KAFKA_API_SECRET":        "SECRET",
 		// KAFKA_ALLOW_TOPIC_ADMIN left off => admin disabled.
 	})
-	c := NewClient(context.Background(), nil)
+	c := NewClient(context.Background(), nil, nil)
 	ctx := context.Background()
 
 	t.Run("publish without value", func(t *testing.T) {

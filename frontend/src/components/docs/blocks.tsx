@@ -5,6 +5,8 @@ import { cn } from "@/lib/utils";
 import { CodeBlock } from "./code-block";
 import { Connect } from "./connect";
 import { ToolList } from "./tool-list";
+import { SkillDownload } from "./skill-download";
+import { ArchitectureDiagram } from "./architecture-diagram";
 
 const calloutStyles = {
   tip: { icon: Lightbulb, wrap: "border-emerald-500/25 bg-emerald-500/[0.07]", ic: "text-emerald-500" },
@@ -132,10 +134,14 @@ export function BlockRenderer({ blocks }: { blocks: Block[] }) {
             return <Connect key={i} serverKeys={block.serverKeys} />;
           case "tools":
             return <ToolList key={i} serverKey={block.serverKey} />;
+          case "skill":
+            return <SkillDownload key={i} />;
           case "cards":
             return <CardGrid key={i} items={block.items} />;
           case "steps":
             return <Steps key={i} items={block.items} />;
+          case "diagram":
+            return <ArchitectureDiagram key={i} variant={block.variant} />;
           default:
             return null;
         }

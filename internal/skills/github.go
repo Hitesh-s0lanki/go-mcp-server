@@ -32,9 +32,9 @@ const (
 // Downloader fetches a complete skill from GitHub: it lists the skill directory
 // (recursively) and downloads every file's raw content concurrently. It is
 // deterministic and needs no model -- discovery is skills_find's job; this just
-// materialises a skill you already located.
+// materialises a skill you already located. It reads only public repos through
+// GitHub's public API, unauthenticated (60 contents-API calls/hr per IP).
 type Downloader struct {
-	Token  string // optional GITHUB_TOKEN; raises the 60/hr unauthenticated limit
 	Client *http.Client
 
 	apiBase string // unexported; the const in prod, overridden by tests
@@ -45,11 +45,10 @@ type Downloader struct {
 	skipHostCheck bool
 }
 
-// NewDownloader builds a downloader. An empty token is fine (public repos work
-// unauthenticated, just rate-limited).
-func NewDownloader(token string) *Downloader {
+// NewDownloader builds a downloader. It runs unauthenticated against GitHub's
+// public API -- fine for public repos, just rate-limited.
+func NewDownloader() *Downloader {
 	return &Downloader{
-		Token:   token,
 		Client:  &http.Client{Timeout: 60 * time.Second},
 		apiBase: githubAPIBase,
 	}
@@ -216,9 +215,6 @@ func (d *Downloader) list(ctx context.Context, ref skillRef, dir string, depth i
 		return fmt.Errorf("build contents request: %w", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	if d.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+d.Token)
-	}
 
 	resp, err := d.Client.Do(req)
 	if err != nil {

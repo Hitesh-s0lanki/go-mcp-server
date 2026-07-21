@@ -25,7 +25,7 @@ func (namespace) Server(deps *mcpx.Deps) (*mcp.Server, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	client := NewClient(ctx, deps.Log)
+	client := NewClient(ctx, deps.DB, deps.Log)
 
 	s := mcp.NewServer(&mcp.Implementation{Name: "event", Version: "0.1.0"}, nil)
 
@@ -57,6 +57,7 @@ type capabilitiesOutput struct {
 	DefaultGroup    string   `json:"default_group"`
 	DefaultTopic    string   `json:"default_topic,omitempty"`
 	AllowTopicAdmin bool     `json:"allow_topic_admin"`
+	OwnerScoped     bool     `json:"owner_scoped"`
 	Tools           []string `json:"tools"`
 	Notes           []string `json:"notes,omitempty"`
 }
@@ -69,6 +70,7 @@ func (c *Client) capabilities(_ context.Context, _ *mcp.CallToolRequest, _ struc
 		DefaultGroup:    c.defaultGroup,
 		DefaultTopic:    c.defaultTopic,
 		AllowTopicAdmin: c.allowTopicAdmin,
+		OwnerScoped:     c.keys != nil,
 		Tools: []string{
 			"event_capabilities",
 			"event_publish", "event_consume",
@@ -81,6 +83,11 @@ func (c *Client) capabilities(_ context.Context, _ *mcp.CallToolRequest, _ struc
 	}
 	if !c.allowTopicAdmin {
 		out.Notes = append(out.Notes, "topic create/delete are disabled; set KAFKA_ALLOW_TOPIC_ADMIN=true to enable event_create_topic / event_delete_topic")
+	}
+	if out.OwnerScoped {
+		out.Notes = append(out.Notes, "events are scoped per caller: event_publish stamps your X-API-Key identity onto each record and event_consume returns only the events you published")
+	} else {
+		out.Notes = append(out.Notes, "per-caller event scoping is unavailable (no DATABASE_URL / api-key resolver); publish and consume will report an error until it is configured")
 	}
 	return jsonResult(out)
 }

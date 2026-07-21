@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import Link from "next/link";
 import {
   Bot,
   Brain,
@@ -36,6 +37,27 @@ export type ToolDoc = {
   params: ToolParam[];
 };
 
+/**
+ * Two very different kinds of "requirement" a namespace has, kept apart on
+ * purpose. `caller` is the only thing the person calling the API supplies on
+ * every request. `server` lists the operator-side environment the hosted
+ * instance already has configured -- callers never set these, they matter only
+ * when self-hosting. Flattening the two into one line reads as "you must supply
+ * an OpenAI key", which is false for a hosted user.
+ */
+export type ServerRequires = {
+  /** Sent by the caller on every request (e.g. the X-API-Key header). */
+  caller: string;
+  /**
+   * Extra credentials the user connects themselves, scoped to their own
+   * account -- e.g. GSC, where each caller reads their own Google properties.
+   * Unlike `server`, this IS shown to the reader: it's their job to supply.
+   */
+  userProvided?: string;
+  /** Configured on the server; already set on the hosted instance. Not shown. */
+  server?: string;
+};
+
 export type ServerDoc = {
   key: string;
   name: string;
@@ -43,7 +65,7 @@ export type ServerDoc = {
   path: string;
   icon: LucideIcon;
   tagline: string;
-  requires?: string;
+  requires?: ServerRequires;
   /** Optional operational note rendered as a tip on the server page. */
   note?: string;
   /** A concrete "how it helps" walkthrough, rendered as an example callout. */
@@ -59,7 +81,10 @@ export const servers: Record<string, ServerDoc> = {
     icon: Brain,
     tagline:
       "Per-user long-term memory. Hybrid RAG (semantic + keyword) over Postgres + pgvector.",
-    requires: "DATABASE_URL (pgvector) · OPENAI_API_KEY · X-API-Key header",
+    requires: {
+      caller: "X-API-Key header",
+      server: "DATABASE_URL (pgvector) · OPENAI_API_KEY",
+    },
     example:
       "Give an agent memory that outlives the session. Call memory_write to store a durable fact once (a user's stack, a decision, a summary), then memory_search before you act so the agent recalls it next time instead of asking again.",
     tools: [
@@ -117,9 +142,10 @@ export const servers: Record<string, ServerDoc> = {
     path: "/skills/mcp",
     icon: Sparkles,
     tagline:
-      "Find and download Agent Skills live from GitHub, plus the raw web primitives they run on. Nothing is cached; every call reflects live GitHub.",
-    requires:
-      "X-API-Key header · FIRECRAWL_API_KEY (web tools) · OPENAI_API_KEY (skills_find) · GITHUB_TOKEN (optional)",
+      "Find and download Agent Skills live from GitHub. Nothing is cached; every call reflects live GitHub.",
+    requires: {
+      caller: "X-API-Key header",
+    },
     example:
       "Need a capability the agent lacks, like editing a PDF form or scaffolding a route? Call skills_find with the requirement in plain language, get the matching SKILL.md back with its source links, then skills_download to pull the whole skill folder from GitHub and use it.",
     tools: [
@@ -138,26 +164,6 @@ export const servers: Record<string, ServerDoc> = {
           "Download a COMPLETE Agent Skill from GitHub: every file in the skill folder (SKILL.md plus scripts and reference files, recursively), fetched concurrently. Use after skills_find to install a skill you located.",
         params: [{ name: "source", type: "string", required: true, description: "GitHub URL (repo/tree/blob/raw) or 'owner/repo/path'." }],
       },
-      {
-        name: "firecrawl_search",
-        summary:
-          "Search the web and get back ranked results (url, title, description). Set scrape=true to also fetch each result's page content as markdown.",
-        params: [
-          { name: "query", type: "string", required: true, description: "What to search the web for." },
-          { name: "limit", type: "int", default: "5", description: "Max results." },
-          { name: "scrape", type: "bool", default: "false", description: "Also fetch each result's page content as markdown." },
-        ],
-      },
-      {
-        name: "firecrawl_scrape",
-        summary: "Fetch a single URL and return its content as clean markdown (optionally raw HTML).",
-        params: [
-          { name: "url", type: "string", required: true, description: "The URL to fetch." },
-          { name: "include_html", type: "bool", default: "false", description: "Also return raw HTML alongside markdown." },
-          { name: "include_boilerplate", type: "bool", default: "false", description: "Keep nav/header/footer; default returns only main content." },
-          { name: "full_content", type: "bool", default: "false", description: "Return the whole page instead of a bounded snippet." },
-        ],
-      },
     ],
   },
   gsc: {
@@ -167,8 +173,10 @@ export const servers: Record<string, ServerDoc> = {
     icon: LineChart,
     tagline:
       "Google Search Console over MCP: properties, search-analytics reports, URL inspection, and sitemaps.",
-    requires:
-      "X-API-Key header · GSC_CREDENTIALS_PATH (service-account JSON) or Application Default Credentials · GSC_ALLOW_DESTRUCTIVE=true for mutations",
+    requires: {
+      caller: "X-API-Key header",
+      userProvided: "your own Google Search Console credentials — a service-account JSON (or OAuth via Application Default Credentials) for the Google account whose properties you want to read",
+    },
     note: "Mounts even without credentials: every tool reports the config problem instead of failing the server. Call gsc_capabilities first to check auth status. Mutating tools (add/delete site, submit/delete sitemap) require GSC_ALLOW_DESTRUCTIVE=true.",
     example:
       "Ask which pages are losing search traffic. Call gsc_compare_periods across two date ranges to surface the movers, then gsc_inspect_url on a page that dropped to check whether Google still has it indexed and why.",
@@ -316,8 +324,10 @@ export const servers: Record<string, ServerDoc> = {
     icon: Rocket,
     tagline:
       "Product Hunt's v2 GraphQL API over MCP: posts, topics, collections, users, and a raw GraphQL escape hatch.",
-    requires:
-      "X-API-Key header · PRODUCTHUNT_TOKEN (developer token) or PRODUCTHUNT_CLIENT_ID + PRODUCTHUNT_CLIENT_SECRET",
+    requires: {
+      caller: "X-API-Key header",
+      server: "PRODUCTHUNT_TOKEN (developer token) or PRODUCTHUNT_CLIENT_ID + PRODUCTHUNT_CLIENT_SECRET",
+    },
     note: "Read-only: only public queries are exposed, no mutations. Mounts even without a token: call producthunt_capabilities first to check auth. producthunt_viewer needs a user-scoped token.",
     example:
       "Track what launched today. Call producthunt_list_posts ordered by RANKING for a topic like artificial-intelligence, read the discussion with producthunt_get_post_comments, or drop to producthunt_graphql for any field the typed tools do not expose.",
@@ -425,8 +435,10 @@ export const servers: Record<string, ServerDoc> = {
     icon: Radio,
     tagline:
       "Publish and consume Kafka messages over MCP. Produce to a topic, poll it back through a durable consumer group, and manage topics on Confluent Cloud.",
-    requires:
-      "X-API-Key header · KAFKA_BOOTSTRAP_SERVERS, KAFKA_API_KEY and KAFKA_API_SECRET (Confluent Cloud) · KAFKA_ALLOW_TOPIC_ADMIN=true to create or delete topics",
+    requires: {
+      caller: "X-API-Key header",
+      server: "KAFKA_BOOTSTRAP_SERVERS, KAFKA_API_KEY and KAFKA_API_SECRET (Confluent Cloud) · KAFKA_ALLOW_TOPIC_ADMIN=true to create or delete topics",
+    },
     note: "Mounts even without credentials: every tool reports the config problem instead of failing the server. Call event_capabilities first to check status. event_publish and event_consume fall back to KAFKA_DEFAULT_TOPIC when no topic is given. Topic create and delete stay disabled until KAFKA_ALLOW_TOPIC_ADMIN=true.",
     example:
       "Wire an agent into your event stream. Call event_publish to emit a record to a Kafka topic, then event_consume from a durable group so a later call picks up only the new messages. Confluent Cloud credentials are all it needs.",
@@ -499,6 +511,7 @@ export const nav: NavGroup[] = [
       { slug: "overview", label: "Overview" },
       { slug: "quickstart", label: "Quickstart" },
       { slug: "authentication", label: "Authentication" },
+      { slug: "keys", label: "API keys" },
     ],
   },
   {
@@ -545,8 +558,10 @@ export type Block =
   | { kind: "code"; lang?: string; title?: string; code: string }
   | { kind: "connect"; serverKeys: string[] }
   | { kind: "tools"; serverKey: string }
+  | { kind: "skill" }
   | { kind: "cards"; items: { title: string; description: string; href: string; icon: LucideIcon }[] }
-  | { kind: "steps"; items: { title: string; content: ReactNode }[] };
+  | { kind: "steps"; items: { title: string; content: ReactNode }[] }
+  | { kind: "diagram"; variant: "request" | "register" };
 
 export type DocPage = {
   slug: string;
@@ -597,6 +612,12 @@ export function pageMarkdown(page: DocPage, baseUrl: string): string {
           }
         break;
       }
+      case "skill":
+        lines.push(
+          "Download the stateful-memory Agent Skill (drop into `.claude/skills/stateful-memory/SKILL.md`): `/api/skills/stateful-memory`",
+          "",
+        );
+        break;
     }
   }
   return lines.join("\n").trim() + "\n";
@@ -651,6 +672,18 @@ const clientExample = JSON.stringify(
 
 /** The copy-paste MCP client config, reused by the landing page. */
 export { clientExample as connectionConfig };
+
+// A copy-paste config scoped to a single namespace, for that server's own doc
+// page. Same shape as clientExample -- one X-API-Key header admits the whole
+// server -- but trimmed to the one route the reader is looking at.
+function serverConfigJson(key: string): string {
+  const s = servers[key];
+  return JSON.stringify(
+    { mcpServers: { [key]: { type: "http", url: `${MCP_BASE_URL}${s.path}`, headers: apiKeyHeaders } } },
+    null,
+    2,
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /* Worked example for the event page: using the topic as an agent's    */
@@ -791,6 +824,44 @@ const eventTaskQueueWalkthrough: Block[] = [
   },
 ];
 
+/* ------------------------------------------------------------------ */
+/* Memory page extra: the stateful-memory Agent Skill. The memory_*     */
+/* tools are only half the story — an agent also needs the discipline   */
+/* to recall before acting and persist after. This section hands the    */
+/* reader that protocol as a drop-in SKILL.md.                          */
+/* ------------------------------------------------------------------ */
+
+const memorySkillSection: Block[] = [
+  { kind: "heading", id: "stateful-skill", text: "Make your agent stateful", icon: Sparkles },
+  {
+    kind: "text",
+    content: (
+      <>
+        The tools above give an agent a place to keep knowledge; they don&rsquo;t
+        teach it <em>when</em> to reach for that place. Install the{" "}
+        <strong>stateful-memory skill</strong> and your agent recalls relevant
+        context before it acts and persists what it learns after &mdash; the
+        difference between having memory and actually using it.
+      </>
+    ),
+  },
+  { kind: "skill" },
+  {
+    kind: "callout",
+    variant: "tip",
+    title: "What the skill encodes",
+    content: (
+      <p>
+        The protocol: recall once per topic at the start, search before asking,
+        write a tight summary after substantial work, capture durable user facts
+        the moment they&rsquo;re stated, and keep a consistent tag taxonomy so
+        retrieval stays precise. It&rsquo;s tuned for the eviction window &mdash;
+        store what matters, keep it current.
+      </p>
+    ),
+  },
+];
+
 export const pages: Record<string, DocPage> = {
   overview: {
     slug: "overview",
@@ -827,8 +898,7 @@ export const pages: Record<string, DocPage> = {
             </p>
             <p>
               <strong>Skills</strong> finds and downloads Agent Skills live from
-              GitHub, or reaches the raw Firecrawl web search and scrape
-              primitives. Nothing is cached.
+              GitHub. Nothing is cached.
             </p>
             <p>
               <strong>Search Console</strong> exposes Google Search Console:
@@ -920,7 +990,7 @@ export const pages: Record<string, DocPage> = {
           <>
             You need <strong>Go 1.26+</strong>, <strong>Postgres + pgvector</strong>{" "}
             (for the memory namespace), and an <strong>OpenAI API key</strong> for
-            embeddings. The skills web tools additionally use a Firecrawl key.
+            embeddings.
           </>
         ),
       },
@@ -1027,8 +1097,12 @@ export const pages: Record<string, DocPage> = {
     ],
   },
 
-  memory: serverPage("memory", "Durable, per-user memory over hybrid RAG. Store facts once and recall them by meaning across sessions."),
-  skills: serverPage("skills", "Locate and pull Agent Skills live from GitHub, and reach the Firecrawl web primitives they run on."),
+  memory: serverPage(
+    "memory",
+    "Durable, per-user memory over hybrid RAG. Store facts once and recall them by meaning across sessions.",
+    memorySkillSection,
+  ),
+  skills: serverPage("skills", "Locate and pull Agent Skills live from GitHub."),
   gsc: serverPage("gsc", "Google Search Console over MCP: property management, search-analytics reporting, URL inspection, and sitemaps."),
   producthunt: serverPage("producthunt", "Product Hunt's v2 GraphQL API over MCP: browse posts, topics, collections, and users, or run raw GraphQL."),
   event: serverPage(
@@ -1100,6 +1174,34 @@ export const pages: Record<string, DocPage> = {
           </>
         ),
       },
+      { kind: "heading", id: "request-lifecycle", text: "Request lifecycle", icon: Waypoints },
+      {
+        kind: "text",
+        content: (
+          <>
+            Every request passes global middleware &mdash; panic recovery, then
+            logging &mdash; hits the stdlib mux, and is admitted by the auth that
+            belongs to <em>that route</em>: <code>X-API-Key</code> for the MCP
+            namespaces, Clerk for the dashboard&rsquo;s key API, nothing for the
+            liveness probe.
+          </>
+        ),
+      },
+      { kind: "diagram", variant: "request" },
+      { kind: "heading", id: "self-registration", text: "Self-registration", icon: Workflow },
+      {
+        kind: "text",
+        content: (
+          <>
+            Each package calls <code>mcpx.Register</code> from its{" "}
+            <code>init()</code>, so importing it is enough to enroll the namespace.{" "}
+            <code>mcpx.Handler</code> then builds every registered server,{" "}
+            <strong>failing fast</strong> if any can&rsquo;t &mdash; rather than
+            mounting a half-working server that only breaks on the first tool call.
+          </>
+        ),
+      },
+      { kind: "diagram", variant: "register" },
       { kind: "heading", id: "layout", text: "Layout", icon: Layers },
       {
         kind: "code",
@@ -1143,8 +1245,31 @@ function serverPage(key: string, description: string, extra: Block[] = []): DocP
       { kind: "heading", id: "connect", text: "Connect", icon: Compass },
       { kind: "text", content: <>Point your MCP client at the {s.name.toLowerCase()} route:</> },
       { kind: "connect", serverKeys: [key] },
+      { kind: "text", content: <>Drop this into your client&rsquo;s config and swap in the key you mint on the <Link href="/doc/keys" className="font-medium text-foreground underline underline-offset-2">Keys</Link> page:</> },
+      { kind: "code", lang: "json", title: "mcp.json", code: serverConfigJson(key) },
       ...(s.requires
-        ? ([{ kind: "callout", variant: "info", title: "Requires", content: <code>{s.requires}</code> }] as Block[])
+        ? ([
+            {
+              kind: "callout",
+              variant: "info",
+              title: "What you provide",
+              content: (
+                <>
+                  <p>
+                    Every request carries your <code>{s.requires.caller}</code> &mdash; mint one on the{" "}
+                    <Link href="/doc/keys" className="font-medium text-foreground underline underline-offset-2">Keys</Link>{" "}
+                    page. That single key admits the whole server.
+                  </p>
+                  {s.requires.userProvided && (
+                    <p>
+                      This namespace also runs against <strong>your own</strong>{" "}
+                      {s.requires.userProvided}, connected to your account.
+                    </p>
+                  )}
+                </>
+              ),
+            },
+          ] as Block[])
         : []),
       ...(s.note
         ? ([{ kind: "callout", variant: "tip", title: "Good to know", content: <p>{s.note}</p> }] as Block[])

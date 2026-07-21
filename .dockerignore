@@ -1,0 +1,36 @@
+# VCS & CI
+.git
+.github
+.gitignore
+
+# Secrets & local env (never bake into an image)
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+bin/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test & coverage output
+*.test
+*.out
+coverage.*
+
+# The Next.js docs frontend is a separate deploy; keep it out of the Go image.
+frontend/
+node_modules/
+package.json
+package-lock.json
+
+# Docs & editor/OS cruft
+*.md
+.idea/
+.vscode/
+*.swp
+.DS_Store
+posthog.png
