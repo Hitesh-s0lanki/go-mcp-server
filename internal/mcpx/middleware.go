@@ -1,9 +1,13 @@
 package mcpx
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/Hitesh-s0lanki/go-mcp-server/internal/auth"
 )
 
 // statusRecorder captures the response status while preserving the interfaces
@@ -49,6 +53,62 @@ func LogRequests(log *slog.Logger) func(http.Handler) http.Handler {
 				"status", rec.status,
 				"dur", time.Since(start).String(),
 			)
+		})
+	}
+}
+
+// RequireAPIKey rejects any request that does not present a registered
+// X-API-Key, before it reaches a namespace.
+//
+// Admission is enforced here, once, rather than per-tool: a namespace that
+// forgets the check would otherwise be reachable unauthenticated, which is
+// exactly how skills, event, gsc and producthunt ended up open while only
+// memory verified the key.
+//
+// Paths in exempt bypass the check -- /healthz, so a load balancer or uptime
+// probe does not need a credential to see whether the process is alive. It
+// reveals only liveness.
+//
+// Namespaces that need the caller's identity (memory, for row scoping) still
+// resolve the key themselves. That is not a redundant round trip: the resolver
+// caches, so the second lookup is a map hit, and it keeps admission and scoping
+// independently correct rather than coupling one to the other's bookkeeping.
+func RequireAPIKey(res *auth.Resolver, log *slog.Logger, exempt ...string) func(http.Handler) http.Handler {
+	skip := make(map[string]bool, len(exempt))
+	for _, p := range exempt {
+		skip[p] = true
+	}
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if skip[r.URL.Path] {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			key := strings.TrimSpace(r.Header.Get(auth.Header))
+			if key == "" {
+				// Log the rejection but never the key itself.
+				log.Warn("unauthenticated request", "path", r.URL.Path, "remote", r.RemoteAddr)
+				http.Error(w, auth.ErrNoKey.Error(), http.StatusUnauthorized)
+				return
+			}
+
+			if _, err := res.Resolve(r.Context(), key); err != nil {
+				// A malformed or unregistered key is the caller's problem (401);
+				// anything else is ours (503), and must not be reported as a
+				// credential failure or an operator will chase the wrong bug.
+				if errors.Is(err, auth.ErrMalformed) || errors.Is(err, auth.ErrInvalidKey) {
+					log.Warn("rejected api key", "path", r.URL.Path, "remote", r.RemoteAddr, "reason", err)
+					http.Error(w, err.Error(), http.StatusUnauthorized)
+					return
+				}
+				log.Error("api key lookup failed", "path", r.URL.Path, "err", err)
+				http.Error(w, "cannot verify credentials", http.StatusServiceUnavailable)
+				return
+			}
+
+			next.ServeHTTP(w, r)
 		})
 	}
 }

@@ -3,6 +3,7 @@ package mcpx_test
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/Hitesh-s0lanki/go-mcp-server/internal/auth"
 	"github.com/Hitesh-s0lanki/go-mcp-server/internal/mcpx"
 
 	// Register all namespaces via their init().
@@ -52,9 +54,13 @@ func TestNamespacesRoundTrip(t *testing.T) {
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
+	// Every namespace now sits behind RequireAPIKey, so the client must present
+	// a registered key even to reach the dummy tools.
+	keyed := &http.Client{Transport: keyRT{mintKey(t, pool)}}
+
+	// The skills ping echoes its argument back; assert the round-trip.
 	cases := map[string]string{
 		"/skills/mcp": "skills_ping",
-		"/event/mcp":  "event_ping",
 	}
 
 	for path, tool := range cases {
@@ -64,7 +70,7 @@ func TestNamespacesRoundTrip(t *testing.T) {
 
 			client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil)
 			session, err := client.Connect(ctx,
-				&mcp.StreamableClientTransport{Endpoint: ts.URL + path}, nil)
+				&mcp.StreamableClientTransport{Endpoint: ts.URL + path, HTTPClient: keyed}, nil)
 			if err != nil {
 				t.Fatalf("connect %s: %v", path, err)
 			}
@@ -85,6 +91,32 @@ func TestNamespacesRoundTrip(t *testing.T) {
 			}
 		})
 	}
+
+	// The event namespace has no echo tool; drive its no-network capabilities
+	// tool instead. It mounts and answers even without Kafka configured.
+	t.Run("event", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil)
+		session, err := client.Connect(ctx,
+			&mcp.StreamableClientTransport{Endpoint: ts.URL + "/event/mcp", HTTPClient: keyed}, nil)
+		if err != nil {
+			t.Fatalf("connect /event/mcp: %v", err)
+		}
+		defer func() { _ = session.Close() }()
+
+		res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "event_capabilities"})
+		if err != nil {
+			t.Fatalf("call event_capabilities: %v", err)
+		}
+		if res.IsError {
+			t.Fatalf("event_capabilities returned tool error: %+v", res.Content)
+		}
+		if text := firstText(res); !strings.Contains(text, "event_publish") {
+			t.Fatalf("event_capabilities: unexpected reply %q", text)
+		}
+	})
 }
 
 // TestHandlerFailsWithoutDatabase pins the fail-fast contract: a namespace that
@@ -101,6 +133,104 @@ func TestHandlerFailsWithoutDatabase(t *testing.T) {
 	if !strings.Contains(err.Error(), "/memory/mcp") {
 		t.Fatalf("error should name the failing namespace, got: %v", err)
 	}
+}
+
+// keyRT attaches an API key to every outbound request.
+type keyRT struct{ key string }
+
+func (k keyRT) RoundTrip(r *http.Request) (*http.Response, error) {
+	if k.key != "" {
+		r.Header.Set(auth.Header, k.key)
+	}
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+// mintKey inserts an api key directly and returns the string a client presents.
+func mintKey(t *testing.T, pool *pgxpool.Pool) string {
+	t.Helper()
+	key := auth.GenerateKey()
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO api_keys (key, label) VALUES ($1, 'mcpx-integration-test')`, key); err != nil {
+		t.Fatalf("mint key: %v", err)
+	}
+	return key
+}
+
+// TestRequireAPIKey pins the admission contract that the audit was about: every
+// namespace rejects an unauthenticated caller, and it does so at the transport
+// rather than relying on each namespace to remember. /healthz stays open.
+func TestRequireAPIKey(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("DATABASE_URL not set")
+	}
+	t.Setenv("OPENAI_API_KEY", "test-key-not-called")
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	handler, err := mcpx.Handler(mcpx.Options{
+		Log:  slog.New(slog.DiscardHandler),
+		Deps: mcpx.Deps{DB: pool},
+	})
+	if err != nil {
+		t.Fatalf("build handler: %v", err)
+	}
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	paths := []string{"/memory/mcp", "/skills/mcp", "/event/mcp"}
+
+	t.Run("no key is rejected", func(t *testing.T) {
+		for _, p := range paths {
+			if got := status(t, "", http.MethodPost, ts.URL+p); got != http.StatusUnauthorized {
+				t.Errorf("%s without a key: got %d, want 401", p, got)
+			}
+		}
+	})
+
+	t.Run("unregistered key is rejected", func(t *testing.T) {
+		// Well-formed but never minted: the format check must not be mistaken
+		// for proof the key exists.
+		got := status(t, auth.GenerateKey(), http.MethodPost, ts.URL+"/skills/mcp")
+		if got != http.StatusUnauthorized {
+			t.Errorf("unregistered key: got %d, want 401", got)
+		}
+	})
+
+	t.Run("healthz stays open", func(t *testing.T) {
+		if got := status(t, "", http.MethodGet, ts.URL+healthzPath); got != http.StatusOK {
+			t.Errorf("healthz without a key: got %d, want 200", got)
+		}
+	})
+}
+
+// healthzPath mirrors the unauthenticated liveness route in registry.go.
+const healthzPath = "/healthz"
+
+// status sends one request carrying the given key (empty for none) and reports
+// the status code.
+func status(t *testing.T, key, method, url string) int {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, method, url, strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := (&http.Client{Transport: keyRT{key}}).Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	return res.StatusCode
 }
 
 func firstText(res *mcp.CallToolResult) string {

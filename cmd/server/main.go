@@ -20,7 +20,9 @@ import (
 	// Blank imports run each namespace's init(), which self-registers it with
 	// mcpx. Adding a namespace = add its package here.
 	_ "github.com/Hitesh-s0lanki/go-mcp-server/internal/event"
+	_ "github.com/Hitesh-s0lanki/go-mcp-server/internal/gsc"
 	_ "github.com/Hitesh-s0lanki/go-mcp-server/internal/memory"
+	_ "github.com/Hitesh-s0lanki/go-mcp-server/internal/producthunt"
 	_ "github.com/Hitesh-s0lanki/go-mcp-server/internal/skills"
 )
 

@@ -38,6 +38,28 @@ func session(t *testing.T, url, key string) *mcp.ClientSession {
 	return s
 }
 
+// postStatus sends a bare POST with the given key (empty for none) and reports
+// the status code, for asserting transport-level admission without opening an
+// MCP session.
+func postStatus(t *testing.T, url, key string) int {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	c := &http.Client{Transport: hdrRT{key}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	return res.StatusCode
+}
+
 func call(t *testing.T, s *mcp.ClientSession, name string, args map[string]any) *mcp.CallToolResult {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -90,21 +112,18 @@ func TestSkillFlow(t *testing.T) {
 	defer ts.Close()
 	url := ts.URL + "/memory/mcp"
 
-	// 1. No key -> identity fails closed.
-	anon := session(t, url, "")
-	r := call(t, anon, "memory_list", map[string]any{"tags": []string{"user-profile"}})
-	if !r.IsError || !strings.Contains(text(r), memory.APIKeyHeader) {
-		t.Fatalf("expected identity error without key, got: %+v", text(r))
+	// 1. No key -> fails closed at the transport. This used to surface as a tool
+	// error result the model could read; mcpx.RequireAPIKey now rejects the
+	// request at the mux, so the session never opens and no tool is dispatched.
+	if got := postStatus(t, url, ""); got != http.StatusUnauthorized {
+		t.Fatalf("no key: got %d, want 401", got)
 	}
-	_ = anon.Close()
 
-	// 1b. A well-formed but unregistered key -> rejected.
-	bogus := session(t, url, memory.GenerateAPIKey())
-	rb := call(t, bogus, "memory_list", map[string]any{})
-	if !rb.IsError || !strings.Contains(strings.ToLower(text(rb)), "invalid") {
-		t.Fatalf("expected invalid-key error for an unregistered key, got: %+v", text(rb))
+	// 1b. A well-formed but unregistered key -> rejected too. Matching the
+	// minted format is not proof the key exists.
+	if got := postStatus(t, url, memory.GenerateAPIKey()); got != http.StatusUnauthorized {
+		t.Fatalf("unregistered key: got %d, want 401", got)
 	}
-	_ = bogus.Close()
 
 	// 2. Registered key: identity resolves (what .mcp.json provides).
 	s := session(t, url, key)

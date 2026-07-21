@@ -6,7 +6,9 @@ Multi-namespace [Model Context Protocol](https://modelcontextprotocol.io) server
 | -------------- | --------- | -------------------------------- |
 | `/memory/mcp`  | memory    | Memory storage & recall tools    |
 | `/skills/mcp`  | skills    | Web search & scrape (Firecrawl)  |
-| `/event/mcp`   | event     | Event-related tools              |
+| `/event/mcp`   | event     | Kafka produce/consume (Confluent)|
+| `/gsc/mcp`     | gsc       | Google Search Console tools      |
+| `/producthunt/mcp` | producthunt | Product Hunt API v2 (read) tools |
 
 Namespaces self-register at startup, so adding a new one is a single package with an `init()` — `main.go` never changes. Router is stdlib `net/http`; a domain never reaches across another domain except through `internal/mcpx`.
 
@@ -22,15 +24,37 @@ Namespaces self-register at startup, so adding a new one is a single package wit
 ```
 cmd/server/main.go     # config, graceful shutdown
 internal/
+  auth/                # X-API-Key format + resolver (api_keys table)
   mcpx/                # registry, Handler(), Chain(); integration test
   memory/              # per-user memories, hybrid RAG (Postgres + pgvector)
   skills/              # skills_find agent + skills_download + web primitives
-  event/               # register.go  (dummy event_ping tool)
+  event/               # Kafka produce/consume over Confluent Cloud
+  gsc/                 # Google Search Console (searchconsole/v1)
+  producthunt/         # Product Hunt API v2 (GraphQL), read-only
+frontend/              # Next.js docs + landing site (see § Frontend)
 ```
 
 `internal/mcpx/integration_test.go` drives a real MCP client through
 `initialize` + `tools/call` against the namespaces over an in-process
 Streamable HTTP server.
+
+## Auth
+
+Every namespace requires an `X-API-Key` header carrying a key from the
+`api_keys` table. `mcpx.RequireAPIKey` enforces this in the middleware chain, so
+admission is checked once at the transport rather than per-tool — a namespace
+cannot forget it. Unknown or malformed keys get a `401` before dispatch.
+
+`GET /healthz` is the one exempt route: an uptime probe needs no credential, and
+it reveals only liveness.
+
+The **memory** namespace additionally resolves the same key to an `api_key_id`
+and scopes every row to it. That is *identity*, not admission — which is why the
+check exists in both places.
+
+Keys are minted, never auto-provisioned (`auth.GenerateKey` /
+`Resolver.Create`). Clients set the header in their MCP config; see
+[.mcp.json](.mcp.json).
 
 ### skills namespace
 
@@ -71,6 +95,137 @@ uses a lower unauthenticated rate limit, so those tools mount either way).
 absent. `skills_download` needs no key — an optional `GITHUB_TOKEN` just raises
 GitHub's unauthenticated rate limit. None are hard startup dependencies (unlike
 memory, which requires Postgres).
+
+### gsc namespace — Google Search Console
+
+Tools over the official [Search Console API](https://developers.google.com/webmaster-tools)
+(`google.golang.org/api/searchconsole/v1`, which subsumes the legacy Webmaster
+Tools `webmasters/v3` surface): search-analytics reporting, URL inspection, and
+sitemap/property management.
+
+This is a Go port of the Python [**AminForou/mcp-gsc**](https://github.com/AminForou/mcp-gsc)
+server, adapted for a headless Streamable-HTTP server: authentication is
+service-account / Application Default Credentials only — there is no interactive
+OAuth browser flow — and every mutating call is gated behind
+`GSC_ALLOW_DESTRUCTIVE`. The port covers the full API surface (Sites, Sitemaps,
+Search Analytics, URL Inspection); the reference server's interactive-only tools
+(`reauthenticate`, `get_creator_info`) are intentionally dropped.
+
+**17 tools**, all prefixed `gsc_`:
+
+| Group          | Tools                                                                                             |
+| -------------- | ------------------------------------------------------------------------------------------------- |
+| Meta           | `gsc_capabilities` (auth status + tool catalogue; call this first if a tool errors)               |
+| Properties     | `gsc_list_properties`, `gsc_get_site_details`, `gsc_add_site`†, `gsc_delete_site`†                 |
+| Search traffic | `gsc_search_analytics`, `gsc_advanced_search_analytics`, `gsc_performance_overview`, `gsc_compare_periods`, `gsc_search_by_page_query` |
+| URL inspection | `gsc_inspect_url`, `gsc_batch_inspect_urls` (≤10), `gsc_check_indexing_issues` (≤10)               |
+| Sitemaps       | `gsc_list_sitemaps`, `gsc_get_sitemap`, `gsc_submit_sitemap`†, `gsc_delete_sitemap`†               |
+
+† Mutating — requires `GSC_ALLOW_DESTRUCTIVE=true`.
+
+Config:
+
+- **`GSC_CREDENTIALS_PATH`** — path to a service-account JSON key. The account
+  must be added as a user on each property (Search Console → Settings → Users
+  and permissions), or hold domain-wide delegation. Unset ⇒ Application Default
+  Credentials (`GOOGLE_APPLICATION_CREDENTIALS`, gcloud, or the metadata server).
+- **`GSC_DATA_STATE`** — default freshness for analytics: `all` (default) or
+  `final`. Per-call `data_state` overrides it.
+- **`GSC_ALLOW_DESTRUCTIVE`** — enable the mutating tools (default off).
+
+Like skills (and unlike memory), missing credentials are **not** a startup
+failure: the namespace always mounts and each tool reports the problem, so the
+rest of the server still boots. `gsc_capabilities` surfaces the live auth status.
+
+### producthunt namespace — Product Hunt API v2
+
+Read tools over the [Product Hunt API v2](https://api.producthunt.com/v2/docs),
+a single **GraphQL** endpoint (`https://api.producthunt.com/v2/api/graphql`). The
+namespace ships a tiny GraphQL client plus typed tools over posts, topics,
+collections, users and comments, and a raw-query escape hatch. **Read-only** — no
+mutations are exposed.
+
+**11 tools**, all prefixed `producthunt_`:
+
+| Group       | Tools                                                                             |
+| ----------- | --------------------------------------------------------------------------------- |
+| Meta        | `producthunt_capabilities` (auth status + tool catalogue; call this first if a tool errors) |
+| Posts       | `producthunt_list_posts`, `producthunt_get_post`, `producthunt_get_post_comments` |
+| Topics      | `producthunt_list_topics`, `producthunt_get_topic`                                |
+| Collections | `producthunt_list_collections`, `producthunt_get_collection`                      |
+| Users       | `producthunt_get_user`, `producthunt_viewer`                                      |
+| Escape hatch| `producthunt_graphql` (run an arbitrary GraphQL query)                            |
+
+Config — one of two credential styles, resolved in order:
+
+- **`PRODUCTHUNT_TOKEN`** — a non-expiring developer token from the
+  [API dashboard](https://www.producthunt.com/v2/oauth/applications). Simplest;
+  used directly as the bearer token. `PRODUCTHUNT_DEVELOPER_TOKEN` /
+  `PRODUCTHUNT_ACCESS_TOKEN` are accepted as aliases.
+- **`PRODUCTHUNT_CLIENT_ID` + `PRODUCTHUNT_CLIENT_SECRET`** — the OAuth2
+  client-credentials ("client-only") flow. When no developer token is set, the
+  server fetches a public-scope token lazily on first use and caches it.
+
+Like skills and gsc (and unlike memory), missing credentials are **not** a
+startup failure: the namespace always mounts and each tool reports the problem.
+`producthunt_capabilities` surfaces the live auth status. `producthunt_viewer`
+additionally needs a user-scoped token — client-credentials tokens have no viewer.
+
+### event namespace — Kafka (Confluent Cloud)
+
+A worked example of realtime event-driven architecture: produce and consume
+tools an agent uses to put messages on a Kafka topic and read them back, over
+**Confluent Cloud**. The client is pure-Go [`segmentio/kafka-go`](https://github.com/segmentio/kafka-go);
+the connection is SASL_SSL, mechanism PLAIN (Confluent API key = SASL username,
+API secret = password), TLS with system roots.
+
+**6 tools**, all prefixed `event_`:
+
+| Tool | Purpose |
+| --- | --- |
+| `event_capabilities` | Config + readiness (broker, auth, default group/topic, admin gate) + tool catalogue. No network. Call first if a tool errors. |
+| `event_publish` | Produce one message (`topic`, `key`, `value`, `headers`). Returns the partition + offset it landed at. |
+| `event_consume` | Bounded poll: read up to `max` messages within `timeout_ms`. `from=group` (default) uses a durable consumer group whose offsets advance across calls; `earliest`/`latest` peek partition 0. |
+| `event_topics` | List topics + partition counts (read-only). |
+| `event_create_topic` / `event_delete_topic` | Topic admin — gated behind `KAFKA_ALLOW_TOPIC_ADMIN`. |
+
+```
+event_publish(topic,key,value)          event_consume(topic,group,max,from)
+   │  key -> hash partition                 │  ephemeral reader per call
+   │  Client.Produce (real offset)          ├─ FetchMessage until max or timeout
+   ▼                                        └─ CommitMessages (group mode)
+ partition + offset                         ▼
+        │        ├──── Confluent Cloud (SASL_SSL / PLAIN / TLS) ────┤
+        │        │                                                  ▼
+ event_topics ───┘                    []{partition,offset,key,value,headers,ts}
+ event_create_topic / event_delete_topic   (gated: KAFKA_ALLOW_TOPIC_ADMIN)
+```
+
+Config: `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_API_KEY`, `KAFKA_API_SECRET` enable the
+tools; `KAFKA_CONSUMER_GROUP` (default `go-mcp-server`) and `KAFKA_DEFAULT_TOPIC`
+set defaults; `KAFKA_ALLOW_TOPIC_ADMIN` gates topic create/delete. Like skills,
+gsc and producthunt (and unlike memory), missing config is **not** a startup
+failure: the namespace always mounts and each tool reports the problem;
+`event_capabilities` surfaces the status. On Confluent Cloud, created topics must
+use replication factor 3 (the default).
+
+## Frontend
+
+`frontend/` is a [Next.js](https://nextjs.org) app (App Router, Tailwind,
+shadcn/ui) that serves the project's landing page and namespace documentation
+under `/doc`. Every connection URL shown in the docs is derived at render time
+from `NEXT_PUBLIC_MCP_BASE_URL` (see [frontend/.env.local](frontend/README.md)),
+so pointing it at a tunnel or prod host rewrites every example — nothing is
+hard-coded.
+
+```bash
+cd frontend
+npm install
+npm run dev          # http://localhost:3001
+```
+
+The tool catalogue rendered in the docs lives in `src/lib/docs.tsx`; keep it in
+sync with the Go tools when a namespace changes.
 
 ## Quick start
 
@@ -128,7 +283,7 @@ Override the defaults if needed: `make tunnel NGROK_URL=your.ngrok-free.app PORT
 
 ## Connecting a client
 
-`.mcp.json` registers all three namespaces as Streamable HTTP servers, pointing
+`.mcp.json` registers every namespace as a Streamable HTTP server, pointing
 at the ngrok domain by default. Clients that read project-scoped MCP config
 (e.g. Claude Code) pick it up automatically.
 

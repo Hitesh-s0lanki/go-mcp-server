@@ -9,11 +9,31 @@
     },
     "skills": {
       "type": "http",
-      "url": "https://robust-enough-loon.ngrok-free.app/skills/mcp"
+      "url": "https://robust-enough-loon.ngrok-free.app/skills/mcp",
+      "headers": {
+        "X-API-Key": "mcp_d398e9b902cc4cf3ab438dbe8cf76715"
+      }
     },
     "event": {
       "type": "http",
-      "url": "https://robust-enough-loon.ngrok-free.app/event/mcp"
+      "url": "https://robust-enough-loon.ngrok-free.app/event/mcp",
+      "headers": {
+        "X-API-Key": "mcp_d398e9b902cc4cf3ab438dbe8cf76715"
+      }
+    },
+    "gsc": {
+      "type": "http",
+      "url": "https://robust-enough-loon.ngrok-free.app/gsc/mcp",
+      "headers": {
+        "X-API-Key": "mcp_d398e9b902cc4cf3ab438dbe8cf76715"
+      }
+    },
+    "producthunt": {
+      "type": "http",
+      "url": "https://robust-enough-loon.ngrok-free.app/producthunt/mcp",
+      "headers": {
+        "X-API-Key": "mcp_d398e9b902cc4cf3ab438dbe8cf76715"
+      }
     }
   }
 }

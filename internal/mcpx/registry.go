@@ -11,7 +11,14 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/Hitesh-s0lanki/go-mcp-server/internal/auth"
 )
+
+// healthzPath is the liveness endpoint. It is exempt from authentication so an
+// uptime probe does not need a credential; it reveals only that the process is
+// up.
+const healthzPath = "/healthz"
 
 // Deps are the shared resources handed to every namespace at build time.
 // Fields may be nil when the corresponding config is absent; a namespace that
@@ -97,7 +104,7 @@ func Handler(opts Options) (http.Handler, error) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET "+healthzPath, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
@@ -119,5 +126,13 @@ func Handler(opts Options) (http.Handler, error) {
 		}
 	}
 
-	return Chain(mux, Recover(log), LogRequests(log)), nil
+	// Auth runs after logging so a rejected request still leaves a trace, and
+	// inside Recover so a panic in the check is still contained. deps.DB is
+	// non-nil here: the memory namespace refuses to build without it and the
+	// loop above fails fast, so there is no unauthenticated fallback path.
+	return Chain(mux,
+		Recover(log),
+		LogRequests(log),
+		RequireAPIKey(auth.NewResolver(deps.DB), log, healthzPath),
+	), nil
 }

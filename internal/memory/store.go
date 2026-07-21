@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/Hitesh-s0lanki/go-mcp-server/internal/auth"
 )
 
 // rrfK is the smoothing constant in Reciprocal Rank Fusion. 60 is the value from
@@ -52,8 +54,9 @@ var ErrNotFound = errors.New("memory not found")
 
 // ErrInvalidKey is returned when a presented API key is not in the api_keys
 // table. Keys must be minted (GenerateAPIKey / CreateAPIKey); unknown keys are
-// rejected rather than auto-provisioned.
-var ErrInvalidKey = errors.New("unknown or invalid API key")
+// rejected rather than auto-provisioned. It aliases the auth package's error so
+// errors.Is holds whichever layer reported it.
+var ErrInvalidKey = auth.ErrInvalidKey
 
 // Memory is a stored memory.
 type Memory struct {
@@ -87,10 +90,10 @@ type Store struct {
 	baseCtx context.Context
 	cancel  context.CancelFunc
 
-	// keyCache memoizes api-key-string -> api_key_id. Keys are effectively
-	// immutable once minted, so a hit avoids a lookup on every tool call.
-	keyMu    sync.RWMutex
-	keyCache map[string]string
+	// keys resolves api-key-string -> api_key_id, with its own memoization.
+	// Shared with the transport's RequireAPIKey middleware in behaviour but not
+	// in instance: each holds its own cache over the same table.
+	keys *auth.Resolver
 }
 
 // embedJob is one unit of deferred embedding work. content is captured so the
@@ -113,13 +116,13 @@ func NewStore(ctx context.Context, db *pgxpool.Pool, emb Embedder, log *slog.Log
 	}
 	base, cancel := context.WithCancel(ctx)
 	s := &Store{
-		db:       db,
-		emb:      emb,
-		log:      log,
-		embedQ:   make(chan embedJob, embedQueueSize),
-		baseCtx:  base,
-		cancel:   cancel,
-		keyCache: make(map[string]string),
+		db:      db,
+		emb:     emb,
+		log:     log,
+		embedQ:  make(chan embedJob, embedQueueSize),
+		baseCtx: base,
+		cancel:  cancel,
+		keys:    auth.NewResolver(db),
 	}
 
 	// One worker per core (min 2) drains the queue concurrently. Embedding is
@@ -148,42 +151,13 @@ func (s *Store) Close() { s.cancel() }
 // the caller presents in the X-API-Key header) and its id (the memory partition
 // key). label is free-form for humans; it does not affect scoping.
 func (s *Store) CreateAPIKey(ctx context.Context, label string) (key, id string, err error) {
-	key = GenerateAPIKey()
-	err = s.db.QueryRow(ctx,
-		`INSERT INTO api_keys (key, label) VALUES ($1, $2) RETURNING id`,
-		key, label,
-	).Scan(&id)
-	if err != nil {
-		return "", "", fmt.Errorf("create api key: %w", err)
-	}
-	s.keyMu.Lock()
-	s.keyCache[key] = id
-	s.keyMu.Unlock()
-	return key, id, nil
+	return s.keys.Create(ctx, label)
 }
 
 // ResolveKey maps a key string to its api_key_id, caching the result. An unknown
 // key returns ErrInvalidKey -- keys are not auto-provisioned.
 func (s *Store) ResolveKey(ctx context.Context, key string) (string, error) {
-	s.keyMu.RLock()
-	id, ok := s.keyCache[key]
-	s.keyMu.RUnlock()
-	if ok {
-		return id, nil
-	}
-
-	err := s.db.QueryRow(ctx, `SELECT id FROM api_keys WHERE key = $1`, key).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrInvalidKey
-	}
-	if err != nil {
-		return "", fmt.Errorf("resolve api key: %w", err)
-	}
-
-	s.keyMu.Lock()
-	s.keyCache[key] = id
-	s.keyMu.Unlock()
-	return id, nil
+	return s.keys.Resolve(ctx, key)
 }
 
 // enqueueEmbed hands a memory off for background embedding. It never blocks the
