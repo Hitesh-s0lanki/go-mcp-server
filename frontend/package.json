@@ -23,7 +23,7 @@
     "embla-carousel-react": "^8.6.0",
     "input-otp": "^1.4.2",
     "lucide-react": "^1.25.0",
-    "next": "16.2.10",
+    "next": "16.3.0",
     "next-themes": "^0.4.6",
     "posthog-js": "^1.405.2",
     "radix-ui": "^1.6.4",
